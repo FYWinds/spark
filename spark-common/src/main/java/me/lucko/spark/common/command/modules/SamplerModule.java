@@ -42,6 +42,8 @@ import me.lucko.spark.common.sampler.source.ClassSourceLookup;
 import me.lucko.spark.common.tick.TickHook;
 import me.lucko.spark.common.util.FormatUtil;
 import me.lucko.spark.common.util.MediaTypes;
+import me.lucko.spark.common.util.TimeUtil;
+import me.lucko.spark.common.ws.SamplerViewerSocket;
 import me.lucko.spark.common.ws.ViewerSocket;
 import me.lucko.spark.proto.SparkSamplerProtos;
 import net.kyori.adventure.text.Component;
@@ -85,6 +87,7 @@ public class SamplerModule implements CommandModule {
                 .argumentUsage("start", "only-ticks-over", "tick length millis")
                 .argumentUsage("start", "interval", "interval millis")
                 .argumentUsage("start", "alloc", null)
+                .argumentUsage("start", "lock", null)
                 .argumentUsage("stop", "", null)
                 .argumentUsage("cancel", "", null)
                 .executor(this::profiler)
@@ -99,7 +102,7 @@ public class SamplerModule implements CommandModule {
                         }
                         if (subCommand.equals("start")) {
                             opts = new ArrayList<>(Arrays.asList("--timeout", "--regex", "--combine-all",
-                                    "--not-combined", "--interval", "--only-ticks-over", "--force-java-sampler", "--alloc", "--alloc-live-only"));
+                                    "--not-combined", "--interval", "--only-ticks-over", "--force-java-sampler", "--alloc", "--alloc-live-only", "--lock"));
                             opts.removeAll(arguments);
                             opts.add("--thread"); // allowed multiple times
                         }
@@ -181,7 +184,14 @@ public class SamplerModule implements CommandModule {
                     "Consider setting a timeout value over 30 seconds."));
         }
 
-        SamplerMode mode = arguments.boolFlag("alloc") ? SamplerMode.ALLOCATION : SamplerMode.EXECUTION;
+        boolean alloc = arguments.boolFlag("alloc");
+        boolean lock = arguments.boolFlag("lock");
+        if (alloc && lock) {
+            resp.replyPrefixed(text("The --alloc and --lock flags cannot be used together. Please choose one profiling mode.", RED));
+            return;
+        }
+
+        SamplerMode mode = alloc ? SamplerMode.ALLOCATION : lock ? SamplerMode.LOCK : SamplerMode.EXECUTION;
         boolean allocLiveOnly = arguments.boolFlag("alloc-live-only");
 
         double interval = arguments.doubleFlag("interval");
@@ -255,7 +265,7 @@ public class SamplerModule implements CommandModule {
         platform.getSamplerContainer().setActiveSampler(sampler);
 
         resp.broadcastPrefixed(text()
-                .append(text((mode == SamplerMode.ALLOCATION ? "Allocation Profiler" : "Profiler") + " is now running!", GOLD))
+                .append(text((mode == SamplerMode.ALLOCATION ? "Allocation Profiler" : mode == SamplerMode.LOCK ? "Lock Profiler" : "Profiler") + " is now running!", GOLD))
                 .append(space())
                 .append(text("(" + (sampler instanceof AsyncSampler ? "async" : "built-in java") + ")", DARK_GRAY))
                 .build()
@@ -304,7 +314,7 @@ public class SamplerModule implements CommandModule {
         } else {
             resp.replyPrefixed(text("Profiler is already running!", GOLD));
 
-            long runningTime = (System.currentTimeMillis() - sampler.getStartTime()) / 1000L;
+            long runningTime = (TimeUtil.monotonicCurrentTimeMillis() - sampler.getStartTime()) / 1000L;
 
             if (sampler.isRunningInBackground()) {
                 resp.replyPrefixed(text()
@@ -325,7 +335,7 @@ public class SamplerModule implements CommandModule {
                 resp.replyPrefixed(text("To stop the profiler and upload the results, run:"));
                 resp.replyPrefixed(cmdPrompt("/" + platform.getPlugin().getCommandName() + " profiler stop"));
             } else {
-                long timeoutDiff = (timeout - System.currentTimeMillis()) / 1000L;
+                long timeoutDiff = (timeout - TimeUtil.monotonicCurrentTimeMillis()) / 1000L;
                 resp.replyPrefixed(text("It is due to complete automatically and upload results in " + FormatUtil.formatSeconds(timeoutDiff) + "."));
             }
 
@@ -462,7 +472,7 @@ public class SamplerModule implements CommandModule {
 
     private void handleOpen(SparkPlatform platform, BytesocksClient bytesocksClient, CommandResponseHandler resp, Sampler sampler, Sampler.ExportProps exportProps) {
         try {
-            ViewerSocket socket = new ViewerSocket(platform, bytesocksClient, exportProps);
+            SamplerViewerSocket socket = new SamplerViewerSocket(platform, bytesocksClient, exportProps);
             sampler.attachSocket(socket);
             exportProps.channelInfo(socket.getPayload());
 

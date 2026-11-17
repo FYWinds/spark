@@ -1,17 +1,15 @@
 plugins {
-    id 'com.gradleup.shadow' version '8.3.8'
-    id 'net.minecraftforge.gradle' version '[6.0.24,6.2)'
+    id 'com.gradleup.shadow'
+    id 'net.minecraftforge.gradle' version '[7.0.13,8.0)'
 }
 
 tasks.withType(JavaCompile) {
-    // override, compile targeting J21
-    options.release = 21
+    // override, compile targeting J25
+    options.release = 25
 }
 
 minecraft {
-    mappings channel: 'official', version: '1.21.8'
-    accessTransformer = file('src/main/resources/META-INF/accesstransformer.cfg')
-    reobf = false
+    accessTransformer = true
 }
 
 configurations {
@@ -19,10 +17,22 @@ configurations {
     implementation.extendsFrom shade
 }
 
+repositories {
+    minecraft.mavenizer(it)
+    maven fg.forgeMaven
+    maven fg.minecraftLibsMaven
+}
+
 dependencies {
-    minecraft 'net.minecraftforge:forge:1.21.8-58.0.0'
-    annotationProcessor 'net.minecraftforge:eventbus-validator:7.0-beta.7'
-    shade project(':spark-common')
+    implementation minecraft.dependency('net.minecraftforge:forge:26.3-66.0.9')
+    annotationProcessor 'net.minecraftforge:eventbus-validator:7.0.1'
+    shade(project(':spark-common')) {
+        // use the java11+ bytesocks client instead
+        exclude group: 'me.lucko', module: 'bytesocks-java-client'
+        exclude group: 'org.java_websocket', module: 'Java-WebSocket'
+    }
+    shade 'me.lucko:bytesocks-java-client-j11:1.0-SNAPSHOT'
+    shade project(':spark-minecraft')
 }
 
 processResources {
@@ -51,12 +61,12 @@ shadowJar {
     relocate 'org.objectweb.asm', 'me.lucko.spark.lib.asm'
     relocate 'one.profiler', 'me.lucko.spark.lib.asyncprofiler'
     relocate 'me.lucko.bytesocks.client', 'me.lucko.spark.lib.bytesocks'
-    relocate 'org.java_websocket', 'me.lucko.spark.lib.bytesocks.ws'
 
     project.applyExcludes(delegate)
+
+    mergeServiceFiles()
 }
 
 artifacts {
     archives shadowJar
-    shadow shadowJar
 }

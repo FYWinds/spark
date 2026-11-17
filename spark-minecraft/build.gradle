@@ -1,0 +1,26 @@
+plugins {
+    id 'net.fabricmc.fabric-loom'
+}
+
+tasks.withType(JavaCompile) {
+    // override, compile targeting J25
+    options.release = 25
+}
+
+repositories {
+    maven { url 'https://maven.fabricmc.net/' }
+    mavenLocal()
+}
+
+dependencies {
+    minecraft 'com.mojang:minecraft:26.3'
+
+    implementation(project(':spark-common')) {
+        // use the java11+ bytesocks client instead
+        exclude group: 'me.lucko', module: 'bytesocks-java-client'
+        exclude group: 'org.java_websocket', module: 'Java-WebSocket'
+    }
+
+    implementation 'me.lucko:bytesocks-java-client-j11:1.0-SNAPSHOT'
+}
+

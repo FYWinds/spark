@@ -5,11 +5,14 @@
 
 package me.lucko.spark.common.sampler.async.jfr;
 
+import java.util.Arrays;
+
 /**
  * Fast and compact long->Object map.
  */
 public class Dictionary<T> {
     private static final int INITIAL_CAPACITY = 16;
+    private static final long USED_BIT = 1L << 63;
 
     private long[] keys;
     private Object[] values;
@@ -20,22 +23,33 @@ public class Dictionary<T> {
         this.values = new Object[INITIAL_CAPACITY];
     }
 
+    public Dictionary(int count) {
+        int initialCapacity = Math.max(Integer.highestOneBit(count * 4 - 1), INITIAL_CAPACITY);
+        this.keys = new long[initialCapacity];
+        this.values = new Object[initialCapacity];
+    }
+
     public void clear() {
-        keys = new long[INITIAL_CAPACITY];
-        values = new Object[INITIAL_CAPACITY];
+        Arrays.fill(keys, 0);
+        Arrays.fill(values, null);
         size = 0;
     }
 
-    // spark start
     public int size() {
-        return this.size;
+        return size;
     }
-    // spark end
+
+    // key[i]==0 is used to signal that the i-th position is unset.
+    // Thus, we flip USED_BIT, so the user can still use key=0.
+    private static long remapKey(long key) {
+        if (key == USED_BIT) {
+            throw new IllegalArgumentException("Key not allowed");
+        }
+        return key ^ USED_BIT;
+    }
 
     public void put(long key, T value) {
-        if (key == 0) {
-            throw new IllegalArgumentException("Zero key not allowed");
-        }
+        key = remapKey(key);
 
         int mask = keys.length - 1;
         int i = hashCode(key) & mask;
@@ -56,6 +70,8 @@ public class Dictionary<T> {
 
     @SuppressWarnings("unchecked")
     public T get(long key) {
+        key = remapKey(key);
+
         int mask = keys.length - 1;
         int i = hashCode(key) & mask;
         while (keys[i] != key && keys[i] != 0) {
@@ -68,7 +84,8 @@ public class Dictionary<T> {
     public void forEach(Visitor<T> visitor) {
         for (int i = 0; i < keys.length; i++) {
             if (keys[i] != 0) {
-                visitor.visit(keys[i], (T) values[i]);
+                // Map key back, see remapKey
+                visitor.visit(keys[i] ^ USED_BIT, (T) values[i]);
             }
         }
     }

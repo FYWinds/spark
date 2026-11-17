@@ -35,7 +35,10 @@ import org.junit.jupiter.params.provider.EnumSource;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
@@ -50,7 +53,7 @@ public class SamplerTest {
     @ParameterizedTest
     @EnumSource
     @Disabled
-    public void testSampler(SamplerType samplerType, @TempDir Path directory) {
+    public void testSampler(SamplerType samplerType, @TempDir Path directory) throws ExecutionException, InterruptedException, TimeoutException {
         if (samplerType == SamplerType.ASYNC) {
             String os = System.getProperty("os.name").toLowerCase(Locale.ROOT).replace(" ", "");
             assumeTrue(os.equals("linux") || os.equals("macosx"), "async profiler is only supported on Linux and macOS");
@@ -63,14 +66,15 @@ public class SamplerTest {
             Sampler sampler = new SamplerBuilder()
                     .threadDumper(new ThreadDumper.Specific(thread))
                     .threadGrouper(ThreadGrouper.BY_POOL)
-                    .samplingInterval(10)
+                    .samplingInterval(5)
                     .forceJavaSampler(samplerType == SamplerType.JAVA)
-                    .completeAfter(2, TimeUnit.SECONDS)
+                    .completeAfter(5, TimeUnit.SECONDS)
                     .start(plugin.platform());
 
             String libraryVersion = sampler.getLibraryVersion();
             if (samplerType == SamplerType.ASYNC) {
                 assertNotNull(libraryVersion);
+                System.out.println("Using async profiler version: " + libraryVersion);
             } else {
                 assertNull(libraryVersion);
             }
@@ -79,7 +83,7 @@ public class SamplerTest {
             assertEquals(samplerType, sampler.getType());
 
             assertNotEquals(-1, sampler.getAutoEndTime());
-            sampler.getFuture().join();
+            sampler.getFuture().get(30, TimeUnit.SECONDS);
 
             Sampler.ExportProps exportProps = new Sampler.ExportProps()
                     .creator(TestCommandSender.INSTANCE.toData())
@@ -100,6 +104,28 @@ public class SamplerTest {
             assertTrue(protoThread.getChildrenList().stream().anyMatch(n -> n.getClassName().equals("me.lucko.spark.test.TestClass2") && n.getMethodName().equals("test")));
             assertTrue(protoThread.getChildrenList().stream().anyMatch(n -> n.getClassName().equals("me.lucko.spark.test.TestClass2") && n.getMethodName().equals("testA")));
             assertTrue(protoThread.getChildrenList().stream().anyMatch(n -> n.getClassName().equals("me.lucko.spark.test.TestClass2") && n.getMethodName().equals("testB")));
+
+            Map<String, String> classSourcesMap = proto.getClassSourcesMap();
+            assertEquals(1, classSourcesMap.size());
+            assertEquals("test2", classSourcesMap.get("me.lucko.spark.test.TestClass2"));
+
+            Map<String, String> methodSourcesMap = proto.getMethodSourcesMap();
+            if (samplerType == SamplerType.ASYNC) {
+                assertEquals(2, methodSourcesMap.size());
+                assertEquals("test2_A", methodSourcesMap.get("me.lucko.spark.test.TestClass2;testA;()V"));
+                assertEquals("test2_B", methodSourcesMap.get("me.lucko.spark.test.TestClass2;testB;()V"));
+            } else {
+                assertEquals(0, methodSourcesMap.size());
+            }
+
+            Map<String, String> lineSourcesMap = proto.getLineSourcesMap();
+            if (samplerType == SamplerType.JAVA) {
+                assertEquals(2, lineSourcesMap.size());
+                assertEquals("test2_A", lineSourcesMap.get("me.lucko.spark.test.TestClass2;45"));
+                assertEquals("test2_B", lineSourcesMap.get("me.lucko.spark.test.TestClass2;49"));
+            } else {
+                assertEquals(0, lineSourcesMap.size());
+            }
         }
     }
 

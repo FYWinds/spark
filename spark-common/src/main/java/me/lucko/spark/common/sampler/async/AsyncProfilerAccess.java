@@ -32,9 +32,13 @@ import java.io.OutputStream;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.Set;
 import java.util.logging.Level;
+import java.util.stream.Collectors;
 
 /**
  * Provides a bridge between spark and async-profiler.
@@ -58,6 +62,8 @@ public class AsyncProfilerAccess {
     private final ProfilingEvent profilingEvent;
     /** The event to use for allocation profiling */
     private final ProfilingEvent allocationProfilingEvent;
+    /** The event to use for lock profiling */
+    private final ProfilingEvent lockProfilingEvent;
 
     /** If profiler is null, contains the reason why setup failed */
     private final Exception setupException;
@@ -66,16 +72,30 @@ public class AsyncProfilerAccess {
         AsyncProfiler profiler;
         ProfilingEvent profilingEvent = null;
         ProfilingEvent allocationProfilingEvent = null;
+        ProfilingEvent lockProfilingEvent = null;
         Exception setupException = null;
 
         try {
             profiler = load(platform);
-            if (isEventSupported(profiler, ProfilingEvent.ALLOC, false)) {
+            Set<ProfilingEvent> supportedEvents = getSupportedEvents(profiler);
+
+            // allocation profiler
+            if (supportedEvents.contains(ProfilingEvent.ALLOC)) {
                 allocationProfilingEvent = ProfilingEvent.ALLOC;
             }
-            if (isEventSupported(profiler, ProfilingEvent.WALL, true)) {
-                profilingEvent = ProfilingEvent.WALL;
+
+            // lock profiler
+            if (supportedEvents.contains(ProfilingEvent.LOCK)) {
+                lockProfilingEvent = ProfilingEvent.LOCK;
             }
+
+            // normal profiler
+            if (supportedEvents.contains(ProfilingEvent.WALL)) {
+                profilingEvent = ProfilingEvent.WALL;
+            } else {
+                throw new IllegalStateException("'wall' event is not supported");
+            }
+
         } catch (Exception e) {
             profiler = null;
             setupException = e;
@@ -84,6 +104,7 @@ public class AsyncProfilerAccess {
         this.profiler = profiler;
         this.profilingEvent = profilingEvent;
         this.allocationProfilingEvent = allocationProfilingEvent;
+        this.lockProfilingEvent = lockProfilingEvent;
         this.setupException = setupException;
     }
 
@@ -100,6 +121,10 @@ public class AsyncProfilerAccess {
 
     public ProfilingEvent getAllocationProfilingEvent() {
         return this.allocationProfilingEvent;
+    }
+
+    public ProfilingEvent getLockProfilingEvent() {
+        return this.lockProfilingEvent;
     }
 
     public boolean checkSupported(SparkPlatform platform) {
@@ -131,6 +156,14 @@ public class AsyncProfilerAccess {
         if (!supported && this.profiler != null) {
             platform.getPlugin().log(Level.WARNING, "The allocation profiling mode is not supported on your system. This is most likely because Hotspot debug symbols are not available.");
             platform.getPlugin().log(Level.WARNING, "To resolve, try installing the 'openjdk-11-dbg' or 'openjdk-8-dbg' package using your OS package manager.");
+        }
+        return supported;
+    }
+
+    public boolean checkLockProfilingSupported(SparkPlatform platform) {
+        boolean supported = this.lockProfilingEvent != null;
+        if (!supported && this.profiler != null) {
+            platform.getPlugin().log(Level.WARNING, "The lock profiling mode is not supported on your system.");
         }
         return supported;
     }
@@ -179,35 +212,42 @@ public class AsyncProfilerAccess {
     }
 
     /**
-     * Checks the {@code profiler} to ensure the CPU event is supported.
+     * Gets the set of supported events from the profiler.
      *
      * @param profiler the profiler instance
-     * @return if the event is supported
+     * @return the set of supported events
      */
-    private static boolean isEventSupported(AsyncProfiler profiler, ProfilingEvent event, boolean throwException) {
+    private static Set<ProfilingEvent> getSupportedEvents(AsyncProfiler profiler) {
+        String resp;
         try {
-            String resp = profiler.execute("check,event=" + event).trim();
-            if (resp.equalsIgnoreCase("ok")) {
-                return true;
-            } else if (throwException) {
-                throw new IllegalArgumentException(resp);
-            }
+            resp = profiler.execute("list");
         } catch (Exception e) {
-            if (throwException) {
-                throw new RuntimeException("Event " + event + " is not supported", e);
-            }
+            throw new RuntimeException("Unable to list supported events", e);
         }
-        return false;
+
+        List<String> respLines = Arrays.stream(resp.split("\\r?\\n"))
+                .filter(line -> line.startsWith("  "))
+                .map(String::trim)
+                .collect(Collectors.toList());
+
+        return Arrays.stream(ProfilingEvent.values())
+                .filter(event -> respLines.contains(event.getId()))
+                .collect(Collectors.toSet());
     }
 
     public enum ProfilingEvent {
         WALL(Events.WALL),
-        ALLOC(Events.ALLOC);
+        ALLOC(Events.ALLOC),
+        LOCK(Events.LOCK);
 
         private final String id;
 
         ProfilingEvent(String id) {
             this.id = id;
+        }
+
+        public String getId() {
+            return this.id;
         }
 
         @Override

@@ -22,18 +22,17 @@ package me.lucko.spark.fabric.placeholder;
 
 import com.google.gson.JsonParseException;
 import com.mojang.serialization.JsonOps;
+import eu.pb4.placeholders.api.Placeholder;
 import eu.pb4.placeholders.api.PlaceholderContext;
-import eu.pb4.placeholders.api.PlaceholderHandler;
 import eu.pb4.placeholders.api.PlaceholderResult;
 import eu.pb4.placeholders.api.Placeholders;
 import me.lucko.spark.common.SparkPlatform;
 import me.lucko.spark.common.util.SparkPlaceholder;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.serializer.gson.GsonComponentSerializer;
-import net.minecraft.registry.DynamicRegistryManager;
-import net.minecraft.text.Text;
-import net.minecraft.text.TextCodecs;
-import net.minecraft.util.Identifier;
+import net.minecraft.core.RegistryAccess;
+import net.minecraft.network.chat.ComponentSerialization;
+import net.minecraft.resources.Identifier;
 import org.jetbrains.annotations.Nullable;
 
 public enum SparkFabricPlaceholderApi {
@@ -41,14 +40,14 @@ public enum SparkFabricPlaceholderApi {
 
     public static void register(SparkPlatform platform) {
         for (SparkPlaceholder placeholder : SparkPlaceholder.values()) {
-            Placeholders.register(
-                    Identifier.of("spark", placeholder.getName()),
+            Placeholders.registerCommon(
+                    Identifier.fromNamespaceAndPath("spark", placeholder.getName()),
                     new Handler(platform, placeholder)
             );
         }
     }
 
-    private record Handler(SparkPlatform platform, SparkPlaceholder placeholder) implements PlaceholderHandler {
+    private record Handler(SparkPlatform platform, SparkPlaceholder placeholder) implements Placeholder.Handler<PlaceholderContext, String> {
         @Override
         public PlaceholderResult onPlaceholderRequest(PlaceholderContext context, @Nullable String argument) {
             return toResult(this.placeholder.resolve(this.platform, argument));
@@ -60,9 +59,9 @@ public enum SparkFabricPlaceholderApi {
                     : PlaceholderResult.value(toText(component));
         }
 
-        private static Text toText(Component component) {
-            return TextCodecs.CODEC.decode(
-                    DynamicRegistryManager.EMPTY.getOps(JsonOps.INSTANCE),
+        private static net.minecraft.network.chat.Component toText(Component component) {
+            return ComponentSerialization.CODEC.decode(
+                    RegistryAccess.EMPTY.createSerializationContext(JsonOps.INSTANCE),
                     GsonComponentSerializer.gson().serializeToTree(component)
             ).getOrThrow(JsonParseException::new).getFirst();
         }

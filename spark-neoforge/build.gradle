@@ -1,21 +1,21 @@
 plugins {
-    id 'com.gradleup.shadow' version '8.3.8'
-    id 'net.neoforged.moddev' version '2.0.78'
+    id 'com.gradleup.shadow'
+    id 'net.neoforged.moddev' version '2.0.147'
 }
 
 tasks.withType(JavaCompile).configureEach {
-    // override, compile targeting J21
-    options.release = 21
+    // override, compile targeting J25
+    options.release = 25
 }
 
 java {
     toolchain {
-        languageVersion = JavaLanguageVersion.of(21)
+        languageVersion = JavaLanguageVersion.of(25)
     }
 }
 
 neoForge {
-    version = "21.8.4-beta"
+    version = "26.3.0.48-beta"
     validateAccessTransformers = true
 
     runs {
@@ -40,7 +40,13 @@ configurations {
 }
 
 dependencies {
-    shade project(':spark-common')
+    shade(project(':spark-common')) {
+        // use the java11+ bytesocks client instead
+        exclude group: 'me.lucko', module: 'bytesocks-java-client'
+        exclude group: 'org.java_websocket', module: 'Java-WebSocket'
+    }
+    shade 'me.lucko:bytesocks-java-client-j11:1.0-SNAPSHOT'
+    shade project(':spark-minecraft')
 }
 
 processResources {
@@ -69,7 +75,6 @@ shadowJar {
     relocate 'org.objectweb.asm', 'me.lucko.spark.lib.asm'
     relocate 'one.profiler', 'me.lucko.spark.lib.asyncprofiler'
     relocate 'me.lucko.bytesocks.client', 'me.lucko.spark.lib.bytesocks'
-    relocate 'org.java_websocket', 'me.lucko.spark.lib.bytesocks.ws'
 
     project.applyExcludes(delegate)
 
@@ -78,5 +83,4 @@ shadowJar {
 
 artifacts {
     archives shadowJar
-    shadow shadowJar
 }

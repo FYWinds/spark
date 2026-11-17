@@ -22,30 +22,40 @@ package me.lucko.spark.common.util;
 
 import me.lucko.spark.common.util.log.SparkStaticLogger;
 
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 
 public class SparkThreadFactory implements ThreadFactory {
 
-    public static final Thread.UncaughtExceptionHandler EXCEPTION_HANDLER = (t, e) -> {
-        SparkStaticLogger.log(Level.SEVERE, "Uncaught exception thrown by thread " + t.getName(), e);
+    static final Thread.UncaughtExceptionHandler EXCEPTION_HANDLER = (t, e) -> {
+        if (e instanceof CancellationException) {
+            return; // ignore cancellation exceptions
+        }
+        SparkStaticLogger.log(Level.SEVERE, "Uncaught exception thrown in thread " + t.getName(), e);
     };
 
     private static final AtomicInteger poolNumber = new AtomicInteger(1);
     private final AtomicInteger threadNumber = new AtomicInteger(1);
     private final String namePrefix;
+    private final boolean daemon;
 
     public SparkThreadFactory() {
-        this.namePrefix = "spark-worker-pool-" +
+        this("spark-worker-pool", true);
+    }
+
+    public SparkThreadFactory(String prefix, boolean daemon) {
+        this.namePrefix = prefix + "-" +
                 poolNumber.getAndIncrement() +
                 "-thread-";
+        this.daemon = daemon;
     }
 
     public Thread newThread(Runnable r) {
         Thread t = new Thread(r, this.namePrefix + this.threadNumber.getAndIncrement());
         t.setUncaughtExceptionHandler(EXCEPTION_HANDLER);
-        t.setDaemon(true);
+        t.setDaemon(this.daemon);
         return t;
     }
 

@@ -26,6 +26,7 @@ import me.lucko.spark.common.sampler.async.AsyncSampler;
 import me.lucko.spark.common.sampler.async.SampleCollector;
 import me.lucko.spark.common.sampler.java.JavaSampler;
 import me.lucko.spark.common.tick.TickHook;
+import me.lucko.spark.common.util.TimeUtil;
 
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
@@ -38,7 +39,7 @@ import java.util.logging.Level;
 public class SamplerBuilder {
 
     private SamplerMode mode = SamplerMode.EXECUTION;
-    private double samplingInterval = -1;
+    private double samplingInterval = -1; // milliseconds (execution, lock) or bytes (allocation) depending on the mode
     private boolean ignoreSleeping = false;
     private boolean forceJavaSampler = false;
     private boolean allocLiveOnly = false;
@@ -67,7 +68,7 @@ public class SamplerBuilder {
         if (timeout <= 0) {
             throw new IllegalArgumentException("timeout > 0");
         }
-        this.autoEndTime = System.currentTimeMillis() + unit.toMillis(timeout);
+        this.autoEndTime = TimeUtil.monotonicCurrentTimeMillis() + unit.toMillis(timeout);
         return this;
     }
 
@@ -126,22 +127,49 @@ public class SamplerBuilder {
             }
         }
 
+        boolean ignoreSleeping = this.ignoreSleeping;
+
+        if (this.mode == SamplerMode.LOCK) {
+            if (this.forceJavaSampler) {
+                throw new UnsupportedOperationException("Lock profiling is not supported by the built-in Java sampler.");
+            }
+            if (!canUseAsyncProfiler || !asyncProfiler.checkLockProfilingSupported(platform)) {
+                throw new UnsupportedOperationException("Lock profiling is not supported on your system. Check the console for more info.");
+            }
+            if (ignoreSleeping) {
+                // threads waiting for a lock are often parked, which is exactly what we want to measure!
+                platform.getPlugin().log(Level.WARNING, "Ignoring sleeping threads is not supported in lock profiling mode. Sleeping threads will be included in the results.");
+                ignoreSleeping = false;
+            }
+        }
+
         if (this.forceJavaSampler) {
             canUseAsyncProfiler = false;
         }
 
-        int interval = (int) (this.mode == SamplerMode.EXECUTION ?
-                this.samplingInterval * 1000d : // convert to microseconds
-                this.samplingInterval
+        // microseconds or bytes depending on the mode
+        int interval = (int) (this.mode == SamplerMode.ALLOCATION ?
+                this.samplingInterval :
+                this.samplingInterval * 1000d // convert to microseconds
         );
 
-        SamplerSettings settings = new SamplerSettings(interval, this.threadDumper, this.threadGrouper.get(), this.autoEndTime, this.background, this.ignoreSleeping);
+        SamplerSettings settings = new SamplerSettings(interval, this.threadDumper, this.threadGrouper.get(), this.autoEndTime, this.background, ignoreSleeping);
 
         Sampler sampler;
         if (canUseAsyncProfiler) {
-            SampleCollector<?> collector = this.mode == SamplerMode.ALLOCATION
-                    ? new SampleCollector.Allocation(interval, this.allocLiveOnly)
-                    : new SampleCollector.Execution(interval);
+            SampleCollector<?> collector;
+            switch (this.mode) {
+                case ALLOCATION:
+                    collector = new SampleCollector.Allocation(interval, this.allocLiveOnly);
+                    break;
+                case LOCK:
+                    collector = new SampleCollector.Lock(interval);
+                    break;
+                default:
+                    collector = new SampleCollector.Execution(interval);
+                    break;
+            }
+
             sampler = onlyTicksOverMode
                     ? new AsyncSampler(platform, settings, collector, this.ticksOver)
                     : new AsyncSampler(platform, settings, collector);

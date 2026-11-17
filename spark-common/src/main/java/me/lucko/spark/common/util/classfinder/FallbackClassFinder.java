@@ -20,7 +20,7 @@
 
 package me.lucko.spark.common.util.classfinder;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.Nullable;
 
 /**
  * Uses {@link Class#forName(String)} to find a class reference for given class names.

@@ -20,7 +20,7 @@
 
 package me.lucko.spark.common.sampler.node;
 
-import org.checkerframework.checker.nullness.qual.Nullable;
+import org.jspecify.annotations.Nullable;
 
 import java.util.Objects;
 
@@ -39,6 +39,12 @@ public final class StackTraceNode extends AbstractNode {
 
     public StackTraceNode(Description description) {
         this.description = description;
+    }
+
+    public StackTraceNode copy() {
+        StackTraceNode copy = new StackTraceNode(this.description);
+        copy.merge(this);
+        return copy;
     }
 
     public String getClassName() {

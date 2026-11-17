@@ -50,15 +50,14 @@ public class SparkPlatformTest {
         try (TestSparkPlugin plugin = new TestSparkPlugin(directory)) {
             SparkPlatform platform = plugin.platform();
 
-            Set<String> permissions = platform.getAllSparkPermissions();
+            Set<String> permissions = platform.getCommandManager().getAllSparkPermissions();
             assertEquals(
                     ImmutableSet.of(
                             "spark",
                             "spark.profiler",
                             "spark.tps",
                             "spark.ping",
-                            "spark.healthreport",
-                            "spark.tickmonitor",
+                            "spark.health",
                             "spark.gc",
                             "spark.gcmonitor",
                             "spark.heapsummary",
