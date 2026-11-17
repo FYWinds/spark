@@ -67,9 +67,7 @@ shadowJar {
     relocate 'me.lucko.bytesocks.client', 'me.lucko.spark.lib.bytesocks'
     relocate 'com.neovisionaries.ws', 'me.lucko.spark.lib.websockets'
 
-    exclude 'module-info.class'
-    exclude 'META-INF/maven/**'
-    exclude 'META-INF/proguard/**'
+    project.applyExcludes(delegate)
 }
 
 tasks.named("reobfJar", ReobfuscatedJar) {
