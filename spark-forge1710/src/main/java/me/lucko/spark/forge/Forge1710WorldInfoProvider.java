@@ -20,7 +20,6 @@
 
 package me.lucko.spark.forge;
 
-import cpw.mods.fml.relauncher.ReflectionHelper;
 import cpw.mods.fml.relauncher.Side;
 import cpw.mods.fml.relauncher.SideOnly;
 import me.lucko.spark.common.platform.world.AbstractChunkInfo;
@@ -28,19 +27,18 @@ import me.lucko.spark.common.platform.world.CountMap;
 import me.lucko.spark.common.platform.world.WorldInfoProvider;
 
 import net.minecraft.client.Minecraft;
-import net.minecraft.client.multiplayer.ChunkProviderClient;
 import net.minecraft.client.multiplayer.WorldClient;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityList;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.GameRules;
+import net.minecraft.util.MathHelper;
 import net.minecraft.world.World;
 import net.minecraft.world.WorldServer;
 import net.minecraft.world.chunk.Chunk;
 import net.minecraft.world.chunk.IChunkProvider;
 import net.minecraft.world.gen.ChunkProviderServer;
 
-import java.lang.reflect.Field;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -205,33 +203,60 @@ public abstract class Forge1710WorldInfoProvider implements WorldInfoProvider {
     @SideOnly(Side.CLIENT)
     public static final class Client extends Forge1710WorldInfoProvider {
         private final Minecraft client;
-        private Field chunkListingField;
 
         public Client(Minecraft client) {
             this.client = client;
         }
 
-        @SuppressWarnings("unchecked")
+        /**
+         * While there is no world there is nothing to ask the client thread for, and it can be
+         * busy loading one for longer than spark waits for an answer.
+         */
+        @Override
+        public boolean mustCallSync() {
+            return this.client.theWorld != null;
+        }
+
+        /**
+         * Gets the world, if this is the client thread.
+         */
+        private WorldClient world() {
+            return this.client.func_152345_ab() ? this.client.theWorld : null;
+        }
+
+        /**
+         * Gets the chunks the client has loaded.
+         *
+         * <p>The client's chunk provider keeps a list of them, but mods that optimise it leave the
+         * list empty (it is not used by the game). Asking for every chunk in view distance works
+         * whatever the provider does: it returns an empty chunk for the ones it does not have.</p>
+         */
         private List<Chunk> loadedChunks(WorldClient world) {
+            Entity viewer = this.client.thePlayer;
             IChunkProvider provider = world.getChunkProvider();
-            if (!(provider instanceof ChunkProviderClient)) {
+            if (viewer == null || provider == null) {
                 return Collections.emptyList();
             }
 
-            try {
-                if (this.chunkListingField == null) {
-                    this.chunkListingField = ReflectionHelper.findField(ChunkProviderClient.class, "chunkListing", "field_73237_c");
+            int centerX = MathHelper.floor_double(viewer.posX) >> 4;
+            int centerZ = MathHelper.floor_double(viewer.posZ) >> 4;
+            int radius = Math.min(Math.max(this.client.gameSettings.renderDistanceChunks, 2), 64) + 2;
+
+            List<Chunk> chunks = new ArrayList<>();
+            for (int x = centerX - radius; x <= centerX + radius; x++) {
+                for (int z = centerZ - radius; z <= centerZ + radius; z++) {
+                    Chunk chunk = provider.provideChunk(x, z);
+                    if (chunk != null && !chunk.isEmpty()) {
+                        chunks.add(chunk);
+                    }
                 }
-                List<Chunk> chunks = (List<Chunk>) this.chunkListingField.get(provider);
-                return chunks != null ? chunks : Collections.emptyList();
-            } catch (ReflectiveOperationException | RuntimeException e) {
-                return Collections.emptyList();
             }
+            return chunks;
         }
 
         @Override
         public ChunksResult<ForgeChunkInfo> pollChunks() {
-            WorldClient world = this.client.theWorld;
+            WorldClient world = world();
             if (world == null) {
                 return null;
             }
@@ -243,7 +268,7 @@ public abstract class Forge1710WorldInfoProvider implements WorldInfoProvider {
 
         @Override
         public CountsResult pollCounts() {
-            WorldClient world = this.client.theWorld;
+            WorldClient world = world();
             if (world == null) {
                 return null;
             }
@@ -254,7 +279,7 @@ public abstract class Forge1710WorldInfoProvider implements WorldInfoProvider {
 
         @Override
         public GameRulesResult pollGameRules() {
-            WorldClient world = this.client.theWorld;
+            WorldClient world = world();
             if (world == null) {
                 return null;
             }
