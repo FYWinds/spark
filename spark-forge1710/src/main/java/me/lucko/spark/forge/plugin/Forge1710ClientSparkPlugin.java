@@ -20,7 +20,6 @@
 
 package me.lucko.spark.forge.plugin;
 
-import com.google.common.util.concurrent.ListenableFuture;
 import cpw.mods.fml.common.gameevent.TickEvent;
 import me.lucko.spark.common.platform.PlatformInfo;
 import me.lucko.spark.common.platform.world.WorldInfoProvider;
@@ -29,11 +28,12 @@ import me.lucko.spark.common.tick.TickHook;
 import me.lucko.spark.common.tick.TickReporter;
 import me.lucko.spark.forge.*;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.entity.EntityClientPlayerMP;
 import net.minecraft.command.ICommandSender;
 import net.minecraftforge.client.ClientCommandHandler;
 import net.minecraftforge.common.MinecraftForge;
 
-import java.util.concurrent.ExecutionException;
+import java.util.logging.Level;
 import java.util.stream.Stream;
 
 public class Forge1710ClientSparkPlugin extends Forge1710SparkPlugin {
@@ -70,7 +70,11 @@ public class Forge1710ClientSparkPlugin extends Forge1710SparkPlugin {
 
     @Override
     public Stream<Forge1710CommandSender> getCommandSenders() {
-        return Stream.of(new Forge1710CommandSender(this.minecraft.thePlayer, this));
+        EntityClientPlayerMP player = this.minecraft.thePlayer;
+        if (player == null) {
+            return Stream.empty();
+        }
+        return Stream.of(new Forge1710CommandSender(player, this));
     }
 
     @Override
@@ -85,17 +89,20 @@ public class Forge1710ClientSparkPlugin extends Forge1710SparkPlugin {
 
     @Override
     public WorldInfoProvider createWorldInfoProvider() {
-        return new Forge1710WorldInfoProvider.Client(Minecraft.getMinecraft());
+        return new Forge1710WorldInfoProvider.Client(this.minecraft);
     }
 
     @Override
     public void executeSync(Runnable task) {
-        ListenableFuture<?> future = this.minecraft.func_152344_a(task);
-        try {
-            future.get();
-        } catch (InterruptedException | ExecutionException e) {
-            throw new RuntimeException(e);
-        }
+        // queue without waiting (like upstream's executeIfPossible): blocking here would stall
+        // the calling thread for as long as the client thread is busy
+        this.minecraft.func_152344_a(() -> {
+            try {
+                task.run();
+            } catch (RuntimeException | LinkageError e) {
+                log(Level.WARNING, "Exception while executing a task on the client thread", e);
+            }
+        });
     }
 
     @Override
@@ -108,4 +115,11 @@ public class Forge1710ClientSparkPlugin extends Forge1710SparkPlugin {
         return "sparkc";
     }
 
+
+    /**
+     * Gets if the game is paused, which stops the integrated server from ticking.
+     */
+    static boolean isGamePaused() {
+        return Minecraft.getMinecraft().isGamePaused();
+    }
 }

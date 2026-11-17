@@ -20,14 +20,13 @@
 
 package me.lucko.spark.forge;
 
-import com.google.common.collect.ImmutableMap;
-
 import me.lucko.spark.common.monitor.ping.PlayerPingProvider;
 
 import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.management.ServerConfigurationManager;
 
-import java.util.List;
+import java.util.HashMap;
 import java.util.Map;
 
 public class Forge1710PlayerPingProvider implements PlayerPingProvider {
@@ -39,10 +38,19 @@ public class Forge1710PlayerPingProvider implements PlayerPingProvider {
 
     @Override
     public Map<String, Integer> poll() {
-        ImmutableMap.Builder<String, Integer> builder = ImmutableMap.builder();
-        for (EntityPlayerMP player : (List<EntityPlayerMP>)this.server.getConfigurationManager().playerEntityList) {
-            builder.put(player.getGameProfile().getName(), player.ping);
+        Map<String, Integer> pings = new HashMap<>();
+        ServerConfigurationManager playerList = this.server.getConfigurationManager();
+        if (playerList == null) {
+            return pings;
         }
-        return builder.build();
+
+        // polled off the server thread: snapshot the list instead of iterating it
+        for (Object player : playerList.playerEntityList.toArray()) {
+            if (player instanceof EntityPlayerMP) {
+                EntityPlayerMP playerMP = (EntityPlayerMP) player;
+                pings.put(playerMP.getGameProfile().getName(), playerMP.ping);
+            }
+        }
+        return pings;
     }
 }

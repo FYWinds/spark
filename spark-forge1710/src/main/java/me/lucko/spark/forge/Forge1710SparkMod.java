@@ -30,6 +30,7 @@ import cpw.mods.fml.common.event.FMLServerStoppingEvent;
 import cpw.mods.fml.relauncher.Side;
 import me.lucko.spark.forge.plugin.Forge1710ClientSparkPlugin;
 import me.lucko.spark.forge.plugin.Forge1710ServerSparkPlugin;
+import org.apache.logging.log4j.LogManager;
 
 import java.nio.file.Path;
 
@@ -50,7 +51,11 @@ public class Forge1710SparkMod {
 
     @EventHandler
     public void preInit(FMLPreInitializationEvent e) {
-        this.configDirectory = e.getModConfigurationDirectory().toPath();
+        Path modConfigDirectory = e.getModConfigurationDirectory().toPath();
+        this.configDirectory = modConfigDirectory.resolve("spark");
+
+        // older versions stored their files directly in config/
+        Forge1710ConfigMigration.migrate(modConfigDirectory, this.configDirectory, LogManager.getLogger("spark"));
     }
 
     @EventHandler

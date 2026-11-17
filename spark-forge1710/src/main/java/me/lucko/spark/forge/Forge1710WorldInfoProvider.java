@@ -34,17 +34,75 @@ import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityList;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.GameRules;
+import net.minecraft.world.World;
 import net.minecraft.world.WorldServer;
 import net.minecraft.world.chunk.Chunk;
 import net.minecraft.world.chunk.IChunkProvider;
+import net.minecraft.world.gen.ChunkProviderServer;
 
+import java.lang.reflect.Field;
 import java.util.*;
 import java.util.stream.Collectors;
 
+/**
+ * World information for 1.7.10.
+ *
+ * <p>The polls read unsynchronized world state, so they rely on the default
+ * {@link #mustCallSync()} and are run on the server/client thread by spark.</p>
+ */
 public abstract class Forge1710WorldInfoProvider implements WorldInfoProvider {
     @Override
     public Collection<DataPackInfo> pollDataPacks() {
         return Collections.emptyList();
+    }
+
+    /**
+     * Gets a readable name for the world which is unique across dimensions,
+     * e.g. {@code Overworld (DIM0)}.
+     *
+     * @param world the world
+     * @return the name
+     */
+    protected static String worldName(World world) {
+        int dimension = world.provider.dimensionId;
+        String name;
+        try {
+            name = world.provider.getDimensionName();
+        } catch (RuntimeException e) {
+            name = null;
+        }
+        return name == null || name.isEmpty()
+                ? "DIM" + dimension
+                : name + " (DIM" + dimension + ")";
+    }
+
+    protected static int countTileEntities(List<Chunk> chunks) {
+        int tileEntities = 0;
+        for (Chunk chunk : chunks) {
+            if (chunk != null && chunk.chunkTileEntityMap != null) {
+                tileEntities += chunk.chunkTileEntityMap.size();
+            }
+        }
+        return tileEntities;
+    }
+
+    protected static void addChunks(ChunksResult<ForgeChunkInfo> data, World world, List<Chunk> chunks) {
+        List<ForgeChunkInfo> list = new ArrayList<>();
+        for (Chunk chunk : chunks) {
+            if (chunk != null && hasEntities(chunk)) {
+                list.add(new ForgeChunkInfo(chunk));
+            }
+        }
+        data.put(worldName(world), list);
+    }
+
+    private static boolean hasEntities(Chunk chunk) {
+        for (List<?> entityList : chunk.entityLists) {
+            if (!entityList.isEmpty()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     protected void encodeGameRules(GameRulesResult result, GameRules rules, String worldName) {
@@ -76,41 +134,66 @@ public abstract class Forge1710WorldInfoProvider implements WorldInfoProvider {
             this.server = server;
         }
 
+        @SuppressWarnings("unchecked")
+        private static List<Chunk> loadedChunks(WorldServer world) {
+            ChunkProviderServer provider = world.theChunkProviderServer;
+            return provider != null ? (List<Chunk>) provider.loadedChunks : Collections.emptyList();
+        }
+
         @Override
         public ChunksResult<ForgeChunkInfo> pollChunks() {
-            ChunksResult<ForgeChunkInfo> data = new ChunksResult<>();
-
-            for (WorldServer level : this.server.worldServers) {
-                ArrayList<ForgeChunkInfo> list = new ArrayList<>();
-                for(Chunk chunk : (List<Chunk>)level.theChunkProviderServer.loadedChunks) {
-                    list.add(new ForgeChunkInfo(chunk));
-                }
-                data.put(level.provider.getDimensionName(), list);
+            WorldServer[] worlds = this.server.worldServers;
+            if (worlds == null) {
+                return null;
             }
 
+            ChunksResult<ForgeChunkInfo> data = new ChunksResult<>();
+            for (WorldServer world : worlds) {
+                if (world != null) {
+                    addChunks(data, world, loadedChunks(world));
+                }
+            }
             return data;
         }
 
         @Override
         public CountsResult pollCounts() {
-            int players = this.server.getCurrentPlayerCount();
-            int entities = 0;
-            int chunks = 0;
-
-            for (WorldServer level : this.server.worldServers) {
-                entities += level.loadedEntityList.size();
-                chunks += level.getChunkProvider().getLoadedChunkCount();
+            WorldServer[] worlds = this.server.worldServers;
+            if (worlds == null) {
+                return null;
             }
 
-            return new CountsResult(players, entities, -1, chunks);
+            int players = this.server.getCurrentPlayerCount();
+            int entities = 0;
+            int tileEntities = 0;
+            int chunks = 0;
+
+            for (WorldServer world : worlds) {
+                if (world == null) {
+                    continue;
+                }
+
+                List<Chunk> loadedChunks = loadedChunks(world);
+                entities += world.loadedEntityList.size();
+                tileEntities += countTileEntities(loadedChunks);
+                chunks += loadedChunks.size();
+            }
+
+            return new CountsResult(players, entities, tileEntities, chunks);
         }
 
         @Override
         public GameRulesResult pollGameRules() {
-            GameRulesResult data = new GameRulesResult();
+            WorldServer[] worlds = this.server.worldServers;
+            if (worlds == null) {
+                return null;
+            }
 
-            for (WorldServer world : server.worldServers) {
-                encodeGameRules(data, world.getGameRules(), world.provider.getDimensionName());
+            GameRulesResult data = new GameRulesResult();
+            for (WorldServer world : worlds) {
+                if (world != null) {
+                    encodeGameRules(data, world.getGameRules(), worldName(world));
+                }
             }
 
             setDefaultGameRules(data);
@@ -122,51 +205,63 @@ public abstract class Forge1710WorldInfoProvider implements WorldInfoProvider {
     @SideOnly(Side.CLIENT)
     public static final class Client extends Forge1710WorldInfoProvider {
         private final Minecraft client;
+        private Field chunkListingField;
 
         public Client(Minecraft client) {
             this.client = client;
         }
 
+        @SuppressWarnings("unchecked")
+        private List<Chunk> loadedChunks(WorldClient world) {
+            IChunkProvider provider = world.getChunkProvider();
+            if (!(provider instanceof ChunkProviderClient)) {
+                return Collections.emptyList();
+            }
+
+            try {
+                if (this.chunkListingField == null) {
+                    this.chunkListingField = ReflectionHelper.findField(ChunkProviderClient.class, "chunkListing", "field_73237_c");
+                }
+                List<Chunk> chunks = (List<Chunk>) this.chunkListingField.get(provider);
+                return chunks != null ? chunks : Collections.emptyList();
+            } catch (ReflectiveOperationException | RuntimeException e) {
+                return Collections.emptyList();
+            }
+        }
+
         @Override
         public ChunksResult<ForgeChunkInfo> pollChunks() {
-            ChunksResult<ForgeChunkInfo> data = new ChunksResult<>();
-
-            WorldClient level = this.client.theWorld;
-            if (level == null) {
+            WorldClient world = this.client.theWorld;
+            if (world == null) {
                 return null;
             }
 
-            ArrayList<ForgeChunkInfo> list = new ArrayList<>();
-            IChunkProvider provider = level.getChunkProvider();
-            if(provider instanceof ChunkProviderClient) {
-                List<Chunk> chunks = ReflectionHelper.getPrivateValue(ChunkProviderClient.class, (ChunkProviderClient)provider, "chunkListing", "field_73237_c");
-                for(Chunk chunk : chunks) {
-                    list.add(new ForgeChunkInfo(chunk));
-                }
-            }
-
-            data.put(level.provider.getDimensionName(), list);
-
+            ChunksResult<ForgeChunkInfo> data = new ChunksResult<>();
+            addChunks(data, world, loadedChunks(world));
             return data;
         }
 
         @Override
         public CountsResult pollCounts() {
-            WorldClient level = this.client.theWorld;
-            if (level == null) {
+            WorldClient world = this.client.theWorld;
+            if (world == null) {
                 return null;
             }
 
-            return new CountsResult(-1, level.loadedEntityList.size(), -1, level.getChunkProvider().getLoadedChunkCount());
+            List<Chunk> loadedChunks = loadedChunks(world);
+            return new CountsResult(-1, world.loadedEntityList.size(), countTileEntities(loadedChunks), loadedChunks.size());
         }
 
         @Override
         public GameRulesResult pollGameRules() {
-            WorldClient world = Minecraft.getMinecraft().theWorld;
+            WorldClient world = this.client.theWorld;
+            if (world == null) {
+                return null;
+            }
 
             GameRulesResult data = new GameRulesResult();
 
-            encodeGameRules(data, world.getGameRules(), world.provider.getDimensionName());
+            encodeGameRules(data, world.getGameRules(), worldName(world));
 
             setDefaultGameRules(data);
 

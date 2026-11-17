@@ -25,7 +25,9 @@ import cpw.mods.fml.common.FMLCommonHandler;
 import cpw.mods.fml.common.event.FMLServerStartingEvent;
 import cpw.mods.fml.common.eventhandler.SubscribeEvent;
 import cpw.mods.fml.common.gameevent.TickEvent;
+import me.lucko.spark.common.monitor.ping.PlayerPingProvider;
 import me.lucko.spark.common.platform.PlatformInfo;
+import me.lucko.spark.common.platform.serverconfig.ServerConfigProvider;
 import me.lucko.spark.common.platform.world.WorldInfoProvider;
 import me.lucko.spark.common.sampler.ThreadDumper;
 import me.lucko.spark.common.tick.TickHook;
@@ -35,14 +37,17 @@ import net.minecraft.command.ICommandSender;
 import net.minecraft.entity.player.EntityPlayer;
 import net.minecraft.entity.player.EntityPlayerMP;
 import net.minecraft.server.MinecraftServer;
+import net.minecraft.server.management.ServerConfigurationManager;
 
-import java.util.List;
+import java.util.Arrays;
 import java.util.Queue;
+import java.util.logging.Level;
 import java.util.stream.Stream;
 
 public class Forge1710ServerSparkPlugin extends Forge1710SparkPlugin {
     private final Queue<Runnable> scheduledServerTasks = Queues.newArrayDeque();
 
+    private final Thread serverThread;
     private final ThreadDumper.GameThread gameThreadDumper;
 
     public static Forge1710ServerSparkPlugin register(Forge1710SparkMod mod, FMLServerStartingEvent event) {
@@ -64,14 +69,37 @@ public class Forge1710ServerSparkPlugin extends Forge1710SparkPlugin {
     }
 
     @SubscribeEvent
-    public void onServerTickEnd(TickEvent.ServerTickEvent event) {
-        if(event.phase == TickEvent.Phase.START) {
-            synchronized(scheduledServerTasks) {
-                while (!scheduledServerTasks.isEmpty())
-                {
-                    scheduledServerTasks.poll().run();
-                }
+    public void onServerTickStart(TickEvent.ServerTickEvent event) {
+        if (event.phase == TickEvent.Phase.START) {
+            runScheduledTasks();
+        }
+    }
+
+    // Only fired on a client, i.e. when this is the integrated server.
+    @SubscribeEvent
+    public void onClientTickStart(TickEvent.ClientTickEvent event) {
+        // The integrated server does not tick while the game is paused, so nothing would run
+        // the tasks until the player comes back. Its world does not change while paused either,
+        // so they are run from the client thread instead.
+        if (event.phase == TickEvent.Phase.START && Forge1710ClientSparkPlugin.isGamePaused()) {
+            runScheduledTasks();
+        }
+    }
+
+    private void runScheduledTasks() {
+        Runnable task;
+        while ((task = pollScheduledTask()) != null) {
+            try {
+                task.run();
+            } catch (RuntimeException | LinkageError e) {
+                log(Level.WARNING, "Exception while executing a task on the server thread", e);
             }
+        }
+    }
+
+    private Runnable pollScheduledTask() {
+        synchronized (this.scheduledServerTasks) {
+            return this.scheduledServerTasks.poll();
         }
     }
 
@@ -80,8 +108,10 @@ public class Forge1710ServerSparkPlugin extends Forge1710SparkPlugin {
     public Forge1710ServerSparkPlugin(Forge1710SparkMod mod, MinecraftServer server) {
         super(mod);
         this.server = server;
+        // constructed from FMLServerStartingEvent, which is fired on the server thread
+        this.serverThread = Thread.currentThread();
         this.gameThreadDumper = new ThreadDumper.GameThread();
-        this.gameThreadDumper.setThread(Thread.currentThread());
+        this.gameThreadDumper.setThread(this.serverThread);
     }
 
     @Override
@@ -109,9 +139,13 @@ public class Forge1710ServerSparkPlugin extends Forge1710SparkPlugin {
 
     @Override
     public Stream<Forge1710CommandSender> getCommandSenders() {
+        // may be called off the server thread: snapshot the player list instead of streaming it
+        ServerConfigurationManager playerList = this.server.getConfigurationManager();
+        Object[] players = playerList != null ? playerList.playerEntityList.toArray() : new Object[0];
+
         return Stream.concat(
-                ((List<EntityPlayer>)this.server.getConfigurationManager().playerEntityList).stream(),
-            Stream.of(this.server)
+                Arrays.stream(players).filter(player -> player instanceof EntityPlayer).map(player -> (ICommandSender) player),
+                Stream.of((ICommandSender) this.server)
         ).map(sender -> new Forge1710CommandSender(sender, this));
     }
 
@@ -127,13 +161,28 @@ public class Forge1710ServerSparkPlugin extends Forge1710SparkPlugin {
 
     @Override
     public WorldInfoProvider createWorldInfoProvider() {
-        return new Forge1710WorldInfoProvider.Server(FMLCommonHandler.instance().getMinecraftServerInstance());
+        return new Forge1710WorldInfoProvider.Server(this.server);
+    }
+
+    @Override
+    public PlayerPingProvider createPlayerPingProvider() {
+        return new Forge1710PlayerPingProvider(this.server);
+    }
+
+    @Override
+    public ServerConfigProvider createServerConfigProvider() {
+        return new Forge1710ServerConfigProvider();
     }
 
     @Override
     public void executeSync(Runnable task) {
-        synchronized (scheduledServerTasks) {
-            scheduledServerTasks.add(task);
+        if (Thread.currentThread() == this.serverThread) {
+            task.run();
+            return;
+        }
+
+        synchronized (this.scheduledServerTasks) {
+            this.scheduledServerTasks.add(task);
         }
     }
 

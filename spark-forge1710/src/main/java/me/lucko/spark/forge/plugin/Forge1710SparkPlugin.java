@@ -21,9 +21,15 @@
 package me.lucko.spark.forge.plugin;
 
 import cpw.mods.fml.common.FMLCommonHandler;
+import cpw.mods.fml.common.Loader;
+import cpw.mods.fml.common.ModContainer;
+import cpw.mods.fml.common.ModMetadata;
 import me.lucko.spark.common.SparkPlatform;
 import me.lucko.spark.common.SparkPlugin;
-import me.lucko.spark.common.util.SparkThreadFactory;
+import me.lucko.spark.common.sampler.source.ClassSourceLookup;
+import me.lucko.spark.common.sampler.source.SourceMetadata;
+import me.lucko.spark.common.util.SparkScheduledThreadPoolExecutor;
+import me.lucko.spark.forge.Forge1710ClassSourceLookup;
 import me.lucko.spark.forge.Forge1710CommandSender;
 import me.lucko.spark.forge.Forge1710SparkMod;
 import net.minecraft.command.ICommand;
@@ -33,11 +39,14 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.Executors;
+import java.util.Objects;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.logging.Level;
+import java.util.stream.Collectors;
 
 public abstract class Forge1710SparkPlugin implements SparkPlugin {
 
@@ -49,7 +58,7 @@ public abstract class Forge1710SparkPlugin implements SparkPlugin {
     protected Forge1710SparkPlugin(Forge1710SparkMod mod) {
         this.mod = mod;
         this.logger = LogManager.getLogger("spark");
-        this.scheduler = Executors.newScheduledThreadPool(4, new SparkThreadFactory());
+        this.scheduler = new SparkScheduledThreadPoolExecutor(4);
     }
 
     public void enable() {
@@ -77,6 +86,49 @@ public abstract class Forge1710SparkPlugin implements SparkPlugin {
     @Override
     public void executeAsync(Runnable task) {
         this.scheduler.execute(task);
+    }
+
+    @Override
+    public ClassSourceLookup createClassSourceLookup() {
+        return new Forge1710ClassSourceLookup(this::createClassFinder);
+    }
+
+    @Override
+    public Collection<SourceMetadata> getKnownSources() {
+        List<SourceMetadata> sources = new ArrayList<>();
+        for (ModContainer mod : Loader.instance().getModList()) {
+            try {
+                String modId = mod.getModId();
+                if (modId == null || modId.isEmpty()) {
+                    continue;
+                }
+
+                ModMetadata metadata = mod.getMetadata();
+                sources.add(new SourceMetadata(
+                        modId,
+                        mod.getVersion(),
+                        metadata != null ? authors(metadata) : null,
+                        metadata != null ? emptyToNull(metadata.description) : null,
+                        Forge1710ClassSourceLookup.BUILTIN_MOD_IDS.contains(modId)
+                ));
+            } catch (RuntimeException e) {
+                // skip containers with broken metadata
+            }
+        }
+        return sources;
+    }
+
+    private static String authors(ModMetadata metadata) {
+        if (metadata.authorList == null) {
+            return null;
+        }
+        return emptyToNull(metadata.authorList.stream()
+                .filter(Objects::nonNull)
+                .collect(Collectors.joining(", ")));
+    }
+
+    private static String emptyToNull(String value) {
+        return value == null || value.trim().isEmpty() ? null : value;
     }
 
     @Override
