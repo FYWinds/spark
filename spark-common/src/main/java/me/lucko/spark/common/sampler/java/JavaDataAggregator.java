@@ -35,7 +35,7 @@ import java.util.concurrent.ExecutorService;
 public abstract class JavaDataAggregator extends AbstractDataAggregator {
 
     /** A describer for java.lang.StackTraceElement */
-    private static final StackTraceNode.Describer<StackTraceElement> STACK_TRACE_DESCRIBER = (element, parent) -> {
+    public static final StackTraceNode.Describer<StackTraceElement> STACK_TRACE_DESCRIBER = (element, parent) -> {
         int parentLineNumber = parent == null ? StackTraceNode.NULL_LINE_NUMBER : parent.getLineNumber();
         return new StackTraceNode.JavaDescription(element.getClassName(), element.getMethodName(), element.getLineNumber(), parentLineNumber);
     };
@@ -46,10 +46,17 @@ public abstract class JavaDataAggregator extends AbstractDataAggregator {
     /** The interval to wait between sampling, in microseconds */
     protected final int interval;
 
+    /** Replaces the stack traces of running threads, if the flight recorder is available */
+    private volatile SafepointBiasCorrector corrector;
+
     public JavaDataAggregator(ExecutorService workerPool, ThreadGrouper threadGrouper, int interval, boolean ignoreSleeping) {
         super(threadGrouper, ignoreSleeping);
         this.workerPool = workerPool;
         this.interval = interval;
+    }
+
+    public void setCorrector(SafepointBiasCorrector corrector) {
+        this.corrector = corrector;
     }
 
     /**
@@ -57,20 +64,54 @@ public abstract class JavaDataAggregator extends AbstractDataAggregator {
      *
      * @param threadInfo the thread info
      * @param window the window
+     * @param nanoTime the time the thread info was obtained, from {@link System#nanoTime()}
+     * @param time the time the sample stands for, in microseconds
      */
-    public abstract void insertData(ThreadInfo threadInfo, int window);
+    public abstract void insertData(ThreadInfo threadInfo, int window, long nanoTime, long time);
 
-    protected void writeData(ThreadInfo threadInfo, int window) {
+    /**
+     * Writes sampling data.
+     *
+     * @param threadInfo the thread info
+     * @param window the window
+     * @param nanoTime the time the thread info was obtained
+     * @param time the time the sample stands for, in microseconds
+     * @param bucket identifies the group of samples that are corrected together, see {@link SafepointBiasCorrector}
+     */
+    protected void writeData(ThreadInfo threadInfo, int window, long nanoTime, long time, long bucket) {
         if (this.ignoreSleeping && isSleeping(threadInfo)) {
             return;
         }
 
+        SafepointBiasCorrector corrector = this.corrector;
+        if (corrector != null && isRunningJavaCode(threadInfo)) {
+            corrector.addBiasedSample(bucket, threadInfo.getThreadId(), threadInfo.getThreadName(), threadInfo.getStackTrace(), nanoTime, time, window);
+            return;
+        }
+
+        write(threadInfo.getThreadId(), threadInfo.getThreadName(), threadInfo.getStackTrace(), time, window);
+    }
+
+    public void write(long threadId, String threadName, StackTraceElement[] stack, long time, int window) {
         try {
-            ThreadNode node = getNode(this.threadGrouper.getGroup(threadInfo.getThreadId(), threadInfo.getThreadName()));
-            node.log(STACK_TRACE_DESCRIBER, threadInfo.getStackTrace(), this.interval, window);
+            ThreadNode node = getNode(this.threadGrouper.getGroup(threadId, threadName));
+            node.log(STACK_TRACE_DESCRIBER, stack, time, window);
         } catch (Exception e) {
             e.printStackTrace();
         }
+    }
+
+    /**
+     * Gets if the thread was running Java code when it was dumped, which means it was stopped at
+     * a safepoint instead of where it really was. Threads that are waiting, or are inside a
+     * native method, are dumped where they are.
+     */
+    static boolean isRunningJavaCode(ThreadInfo thread) {
+        if (thread.getThreadState() != Thread.State.RUNNABLE) {
+            return false;
+        }
+        StackTraceElement[] stackTrace = thread.getStackTrace();
+        return stackTrace.length != 0 && !stackTrace[0].isNativeMethod();
     }
 
     static boolean isSleeping(ThreadInfo thread) {

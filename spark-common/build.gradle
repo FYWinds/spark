@@ -74,6 +74,26 @@ sourceSets {
             }
         }
     }
+    // Code that uses the jdk.jfr API, which Java 8 does not have. It is compiled to Java 8
+    // bytecode like everything else, and only loaded on JVMs where the API exists.
+    jfr {
+        compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+    }
+    test {
+        runtimeClasspath += sourceSets.jfr.output
+    }
+}
+
+tasks.named('compileJfrJava', JavaCompile) {
+    // 'release = 8' (set in the root build file) hides the jdk.jfr module
+    options.release.set((Integer) null)
+    sourceCompatibility = '8'
+    targetCompatibility = '8'
+    options.compilerArgs += ['-Xlint:-options']
+}
+
+jar {
+    from sourceSets.jfr.output
 }
 
 test {

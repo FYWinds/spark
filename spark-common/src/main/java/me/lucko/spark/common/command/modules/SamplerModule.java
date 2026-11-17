@@ -37,7 +37,9 @@ import me.lucko.spark.common.sampler.SamplerMode;
 import me.lucko.spark.common.sampler.ThreadDumper;
 import me.lucko.spark.common.sampler.ThreadGrouper;
 import me.lucko.spark.common.sampler.async.AsyncSampler;
+import me.lucko.spark.common.sampler.java.JavaSampler;
 import me.lucko.spark.common.sampler.java.MergeStrategy;
+import me.lucko.spark.common.sampler.jfr.JfrSampler;
 import me.lucko.spark.common.sampler.source.ClassSourceLookup;
 import me.lucko.spark.common.tick.TickHook;
 import me.lucko.spark.common.util.FormatUtil;
@@ -267,7 +269,7 @@ public class SamplerModule implements CommandModule {
         resp.broadcastPrefixed(text()
                 .append(text((mode == SamplerMode.ALLOCATION ? "Allocation Profiler" : mode == SamplerMode.LOCK ? "Lock Profiler" : "Profiler") + " is now running!", GOLD))
                 .append(space())
-                .append(text("(" + (sampler instanceof AsyncSampler ? "async" : "built-in java") + ")", DARK_GRAY))
+                .append(text("(" + engineName(sampler) + ")", DARK_GRAY))
                 .build()
         );
 
@@ -303,6 +305,19 @@ public class SamplerModule implements CommandModule {
                 handleUpload(platform, resp, s, exportProps, saveToFile);
             });
         }
+    }
+
+    private static String engineName(Sampler sampler) {
+        if (sampler instanceof AsyncSampler) {
+            return "async";
+        }
+        if (sampler instanceof JfrSampler) {
+            return "flight recorder";
+        }
+        if (sampler instanceof JavaSampler && ((JavaSampler) sampler).isUsingFlightRecorder()) {
+            return "built-in java + flight recorder";
+        }
+        return "built-in java";
     }
 
     private void profilerInfo(SparkPlatform platform, CommandResponseHandler resp) {

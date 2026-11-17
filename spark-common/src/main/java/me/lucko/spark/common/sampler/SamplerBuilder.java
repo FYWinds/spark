@@ -25,6 +25,9 @@ import me.lucko.spark.common.sampler.async.AsyncProfilerAccess;
 import me.lucko.spark.common.sampler.async.AsyncSampler;
 import me.lucko.spark.common.sampler.async.SampleCollector;
 import me.lucko.spark.common.sampler.java.JavaSampler;
+import me.lucko.spark.common.sampler.jfr.JfrBackend;
+import me.lucko.spark.common.sampler.jfr.JfrSampler;
+import me.lucko.spark.common.sampler.jfr.JfrSupport;
 import me.lucko.spark.common.tick.TickHook;
 import me.lucko.spark.common.util.TimeUtil;
 
@@ -118,9 +121,20 @@ public class SamplerBuilder {
         boolean onlyTicksOverMode = this.ticksOver != -1 && this.tickHook != null;
         boolean canUseAsyncProfiler = asyncProfiler.checkSupported(platform) && (!onlyTicksOverMode || platform.getTickReporter() != null);
 
+        // where async-profiler cannot run (e.g. on Windows), the JVM's flight recorder
+        // is used for allocation and lock profiling instead, if the JVM has it
+        JfrBackend jfrSampler = null;
+
         if (this.mode == SamplerMode.ALLOCATION) {
             if (!canUseAsyncProfiler || !asyncProfiler.checkAllocationProfilingSupported(platform)) {
-                throw new UnsupportedOperationException("Allocation profiling is not supported on your system. Check the console for more info.");
+                jfrSampler = JfrSupport.backend();
+                if (jfrSampler == null || !jfrSampler.supportsAllocation()) {
+                    logFlightRecorderUnavailable(platform, jfrSampler == null ? JfrSupport.unavailableReason() : "requires Java 16 or newer");
+                    throw new UnsupportedOperationException("Allocation profiling is not supported on your system. Check the console for more info.");
+                }
+                if (this.allocLiveOnly) {
+                    throw new UnsupportedOperationException("The --alloc-live-only option needs async-profiler, which is not supported on your system.");
+                }
             }
             if (this.ignoreSleeping) {
                 platform.getPlugin().log(Level.WARNING, "Ignoring sleeping threads is not supported in allocation profiling mode. Sleeping threads will be included in the results.");
@@ -134,7 +148,11 @@ public class SamplerBuilder {
                 throw new UnsupportedOperationException("Lock profiling is not supported by the built-in Java sampler.");
             }
             if (!canUseAsyncProfiler || !asyncProfiler.checkLockProfilingSupported(platform)) {
-                throw new UnsupportedOperationException("Lock profiling is not supported on your system. Check the console for more info.");
+                jfrSampler = JfrSupport.backend();
+                if (jfrSampler == null) {
+                    logFlightRecorderUnavailable(platform, JfrSupport.unavailableReason());
+                    throw new UnsupportedOperationException("Lock profiling is not supported on your system. Check the console for more info.");
+                }
             }
             if (ignoreSleeping) {
                 // threads waiting for a lock are often parked, which is exactly what we want to measure!
@@ -156,7 +174,14 @@ public class SamplerBuilder {
         SamplerSettings settings = new SamplerSettings(interval, this.threadDumper, this.threadGrouper.get(), this.autoEndTime, this.background, ignoreSleeping);
 
         Sampler sampler;
-        if (canUseAsyncProfiler) {
+        if (jfrSampler != null && onlyTicksOverMode && platform.getTickReporter() == null) {
+            throw new UnsupportedOperationException("The --only-ticks-over option is not supported in this profiling mode on your system.");
+        }
+        if (jfrSampler != null) {
+            sampler = onlyTicksOverMode
+                    ? new JfrSampler(platform, settings, this.mode, jfrSampler, this.ticksOver)
+                    : new JfrSampler(platform, settings, this.mode, jfrSampler);
+        } else if (canUseAsyncProfiler) {
             SampleCollector<?> collector;
             switch (this.mode) {
                 case ALLOCATION:
@@ -174,13 +199,21 @@ public class SamplerBuilder {
                     ? new AsyncSampler(platform, settings, collector, this.ticksOver)
                     : new AsyncSampler(platform, settings, collector);
         } else {
+            // a thread dump shows running threads at a safepoint, not where they really are.
+            // if the JVM has the flight recorder, it is used to correct that. not for the
+            // background profiler though, which should cost as little as possible.
+            JfrBackend jfr = this.forceJavaSampler || this.background ? null : JfrSupport.backend();
             sampler = onlyTicksOverMode
-                    ? new JavaSampler(platform, settings, this.tickHook, this.ticksOver)
-                    : new JavaSampler(platform, settings);
+                    ? new JavaSampler(platform, settings, this.tickHook, this.ticksOver, jfr)
+                    : new JavaSampler(platform, settings, jfr);
         }
 
         sampler.start();
         return sampler;
+    }
+
+    private static void logFlightRecorderUnavailable(SparkPlatform platform, String reason) {
+        platform.getPlugin().log(Level.INFO, "The JVM's flight recorder cannot be used instead of async-profiler (" + reason + ").");
     }
 
 }

@@ -89,16 +89,16 @@ public class TickedJavaDataAggregator extends JavaDataAggregator {
     }
 
     @Override
-    public void insertData(ThreadInfo threadInfo, int window) {
+    public void insertData(ThreadInfo threadInfo, int window, long nanoTime, long time) {
         synchronized (this.mutex) {
             int tick = this.tickHook.getCurrentTick();
             if (this.currentTick != tick || this.currentData == null) {
                 pushCurrentTick(this.workerPool);
                 this.currentTick = tick;
-                this.currentData = new TickList(this.expectedSize, window);
+                this.currentData = new TickList(this.expectedSize, window, tick);
             }
 
-            this.currentData.addData(threadInfo);
+            this.currentData.addData(threadInfo, nanoTime, time);
         }
     }
 
@@ -110,7 +110,7 @@ public class TickedJavaDataAggregator extends JavaDataAggregator {
         }
 
         // approximate how long the tick lasted
-        int tickLengthMicros = currentData.sizeWithoutTrailingSleeping() * this.interval;
+        long tickLengthMicros = currentData.lengthWithoutTrailingSleeping();
 
         // don't push data below the threshold
         if (tickLengthMicros < this.tickLengthThreshold) {
@@ -133,17 +133,23 @@ public class TickedJavaDataAggregator extends JavaDataAggregator {
 
     private final class TickList implements Runnable {
         private final List<ThreadInfo> list;
+        private final List<Long> nanoTimes;
+        private final List<Long> times;
         private final int window;
+        private final int tick;
 
-        TickList(int expectedSize, int window) {
+        TickList(int expectedSize, int window, int tick) {
             this.list = new ArrayList<>(expectedSize);
+            this.nanoTimes = new ArrayList<>(expectedSize);
+            this.times = new ArrayList<>(expectedSize);
             this.window = window;
+            this.tick = tick;
         }
 
         @Override
         public void run() {
-            for (ThreadInfo data : this.list) {
-                writeData(data, this.window);
+            for (int i = 0; i < this.list.size(); i++) {
+                writeData(this.list.get(i), this.window, this.nanoTimes.get(i), this.times.get(i), this.tick);
             }
         }
 
@@ -151,18 +157,29 @@ public class TickedJavaDataAggregator extends JavaDataAggregator {
             return this.list;
         }
 
-        public int sizeWithoutTrailingSleeping() {
-            // find the last index at which the thread wasn't sleeping
+        /**
+         * Gets the time the samples stand for, up to the last one at which the thread wasn't sleeping.
+         */
+        public long lengthWithoutTrailingSleeping() {
+            int size = 0;
             for (int i = this.list.size() - 1; i >= 0; i--) {
                 if (!isSleeping(this.list.get(i))) {
-                    return i + 1; // add one to go from index to size
+                    size = i + 1; // add one to go from index to size
+                    break;
                 }
             }
-            return 0;
+
+            long length = 0;
+            for (int i = 0; i < size; i++) {
+                length += this.times.get(i);
+            }
+            return length;
         }
 
-        public void addData(ThreadInfo data) {
+        public void addData(ThreadInfo data, long nanoTime, long time) {
             this.list.add(data);
+            this.nanoTimes.add(nanoTime);
+            this.times.add(time);
         }
     }
 }

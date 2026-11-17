@@ -25,6 +25,8 @@ import me.lucko.spark.common.sampler.AbstractSampler;
 import me.lucko.spark.common.sampler.SamplerMode;
 import me.lucko.spark.common.sampler.SamplerSettings;
 import me.lucko.spark.common.sampler.SamplerType;
+import me.lucko.spark.common.sampler.jfr.JfrBackend;
+import me.lucko.spark.common.sampler.jfr.JfrSession;
 import me.lucko.spark.common.sampler.window.ProfilingWindowUtils;
 import me.lucko.spark.common.sampler.window.WindowStatisticsCollector;
 import me.lucko.spark.common.tick.TickHook;
@@ -34,15 +36,18 @@ import me.lucko.spark.common.util.SparkThreadFactory;
 import me.lucko.spark.common.util.TimeUtil;
 import me.lucko.spark.common.ws.SamplerViewerSocket;
 import me.lucko.spark.proto.SparkSamplerProtos.SamplerData;
+import org.jspecify.annotations.Nullable;
 
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntPredicate;
+import java.util.logging.Level;
 
 /**
  * A sampler implementation using Java (WarmRoast).
@@ -52,8 +57,26 @@ public class JavaSampler extends AbstractSampler implements Runnable {
     /** The worker pool for inserting stack nodes */
     private final ScheduledExecutorService workerPool = new SparkScheduledThreadPoolExecutor(6, new SparkThreadFactory("spark-java-sampler", false));
 
-    /** The main sampling task */
-    private ScheduledFuture<?> task;
+    /** The longest single sleep of the sampling thread, see {@link #sleepUntil(long)} */
+    private static final long MAX_SLEEP_NANOS = TimeUnit.MILLISECONDS.toNanos(2);
+
+    /** How much longer than asked a sleep has to take to count as overrunning */
+    private static final long SLEEP_OVERRUN_NANOS = TimeUnit.MILLISECONDS.toNanos(4);
+
+    /** The number of sleeps in a row that have to overrun before the thread stops sleeping */
+    private static final int SLEEP_OVERRUNS = 3;
+
+    /** How often a thread that has stopped sleeping tries a sleep again */
+    private static final long SLEEP_CHECK_INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(5);
+
+    // only touched by the sampling thread
+    private boolean sleepsOverrun = false;
+    private int sleepOverruns = 0;
+    private long sleepsLastChecked;
+
+    /** The thread that takes the samples */
+    private Thread samplingThread;
+    private volatile boolean running = false;
 
     /** The task to send statistics to the viewer socket */
     private ScheduledFuture<?> socketStatisticsTask;
@@ -66,15 +89,30 @@ public class JavaSampler extends AbstractSampler implements Runnable {
 
     /** The last window that was profiled */
     private final AtomicInteger lastWindow = new AtomicInteger();
-    
+
+    /** The flight recorder, used to correct the stack traces of running threads if available */
+    private final @Nullable JfrBackend jfr;
+    private SafepointBiasCorrector corrector;
+    private JfrSession jfrSession;
+
     public JavaSampler(SparkPlatform platform, SamplerSettings settings) {
+        this(platform, settings, null);
+    }
+
+    public JavaSampler(SparkPlatform platform, SamplerSettings settings, @Nullable JfrBackend jfr) {
         super(platform, settings);
         this.dataAggregator = new SimpleJavaDataAggregator(this.workerPool, settings.threadGrouper(), settings.interval(), settings.ignoreSleeping());
+        this.jfr = jfr;
     }
 
     public JavaSampler(SparkPlatform platform, SamplerSettings settings, TickHook tickHook, int tickLengthThreshold) {
+        this(platform, settings, tickHook, tickLengthThreshold, null);
+    }
+
+    public JavaSampler(SparkPlatform platform, SamplerSettings settings, TickHook tickHook, int tickLengthThreshold, @Nullable JfrBackend jfr) {
         super(platform, settings);
         this.dataAggregator = new TickedJavaDataAggregator(this.workerPool, settings.threadGrouper(), settings.interval(), settings.ignoreSleeping(), tickHook, tickLengthThreshold);
+        this.jfr = jfr;
     }
 
     @Override
@@ -91,18 +129,68 @@ public class JavaSampler extends AbstractSampler implements Runnable {
             }
         }
 
+        if (this.jfr != null) {
+            try {
+                SafepointBiasCorrector corrector = new SafepointBiasCorrector(this.dataAggregator::write, this.interval);
+                this.jfrSession = this.jfr.startExecution(this.interval, corrector);
+                this.corrector = corrector;
+                this.dataAggregator.setCorrector(corrector);
+            } catch (Throwable e) {
+                this.platform.getPlugin().log(Level.WARNING, "Unable to start the flight recorder, the profiler will run without it", e);
+            }
+        }
+
         this.windowStatisticsCollector.recordWindowStartTime(ProfilingWindowUtils.monotonicTimeToWindow(this.startTime));
-        this.task = this.workerPool.scheduleAtFixedRate(this, 0, this.interval, TimeUnit.MICROSECONDS);
+
+        this.running = true;
+        this.samplingThread = new Thread(this, "spark-java-sampler-ticker");
+        this.samplingThread.setDaemon(true);
+        this.samplingThread.start();
+    }
+
+    /**
+     * Gets if the stack traces of running threads are being corrected using the flight recorder.
+     */
+    public boolean isUsingFlightRecorder() {
+        return this.corrector != null;
     }
 
     @Override
     public void stop(boolean cancelled) {
         super.stop(cancelled);
 
-        this.task.cancel(false);
+        this.running = false;
+        if (this.samplingThread != Thread.currentThread()) {
+            this.samplingThread.interrupt();
+        }
 
         if (this.socketStatisticsTask != null) {
             this.socketStatisticsTask.cancel(false);
+        }
+
+        if (this.jfrSession != null) {
+            if (!cancelled) {
+                // the flight recorder's samples arrive late, wait for the ones still on their way
+                this.jfrSession.awaitWatermark(System.nanoTime(), 3000);
+            }
+            this.jfrSession.close();
+            this.jfrSession = null;
+
+            this.corrector.finish();
+            if (this.corrector.isDisabled()) {
+                this.platform.getPlugin().log(Level.WARNING, "Some stack traces were deeper than the flight recorder is set up to record, so its samples were not used. " +
+                        "To fix this, add -XX:FlightRecorderOptions:stackdepth=2048 to the JVM arguments.");
+            } else if (!cancelled) {
+                long corrected = this.corrector.getCorrectedSamples();
+                long total = corrected + this.corrector.getUncorrectedSamples();
+                if (total != 0 && corrected * 2 < total) {
+                    String reason = this.corrector.wasSamplerIrregular()
+                            ? "the JVM did not sample as often as it was asked to"
+                            : this.corrector.getIncompleteStacks() + " of its stack traces were incomplete";
+                    this.platform.getPlugin().log(Level.INFO, "The flight recorder could only be used for " + (corrected * 100 / total) + "% of the samples of running threads " +
+                            "(" + reason + "). The rest are shown where the built-in sampler saw them.");
+                }
+            }
         }
 
         if (!cancelled) {
@@ -113,26 +201,115 @@ public class JavaSampler extends AbstractSampler implements Runnable {
         this.workerPool.shutdown();
     }
 
+    /**
+     * Takes the samples.
+     *
+     * <p>Samples are not taken at a fixed rate. Game ticks start at a fixed rate, so samples taken
+     * at a fixed rate keep landing on the same few points of the tick. The time to the next sample
+     * is random instead, between half and one and a half times the interval. Each sample stands for
+     * the time since the one before it.</p>
+     */
     @Override
     public void run() {
-        // this is effectively synchronized, the worker pool will not allow this task
-        // to concurrently execute.
-        try {
-            long time = TimeUtil.monotonicCurrentTimeMillis();
+        ThreadLocalRandom random = ThreadLocalRandom.current();
+        long intervalNanos = TimeUnit.MICROSECONDS.toNanos(this.interval);
 
-            if (this.autoEndTime != -1 && this.autoEndTime <= time) {
+        // if the thread is held up (e.g. by the garbage collector) the time is not made up for by
+        // taking samples in quick succession, they would all show what happened to be running after
+        long maxSampleNanos = Math.max(intervalNanos * 2, intervalNanos + TimeUnit.MILLISECONDS.toNanos(2));
+
+        long previous = System.nanoTime() - intervalNanos;
+        long next = previous + intervalNanos;
+
+        while (this.running) {
+            try {
+                if (!sleepUntil(next)) {
+                    return;
+                }
+
+                long time = TimeUtil.monotonicCurrentTimeMillis();
+                if (this.autoEndTime != -1 && this.autoEndTime <= time) {
+                    stop(false);
+                    this.future.complete(this);
+                    return;
+                }
+
+                int window = ProfilingWindowUtils.monotonicTimeToWindow(time);
+                ThreadInfo[] threadDumps = this.threadDumper.dumpThreads(this.threadBean);
+                long now = System.nanoTime();
+
+                long sampleMicros = TimeUnit.NANOSECONDS.toMicros(Math.min(now - previous, maxSampleNanos));
+                this.workerPool.execute(new InsertDataTask(threadDumps, window, now, sampleMicros));
+
+                previous = now;
+                next = now + (intervalNanos / 2) + random.nextLong(intervalNanos);
+            } catch (Throwable t) {
+                if (!this.running) {
+                    return; // stopped while taking a sample
+                }
                 stop(false);
-                this.future.complete(this);
+                this.future.completeExceptionally(t);
                 return;
             }
-
-            int window = ProfilingWindowUtils.monotonicTimeToWindow(time);
-            ThreadInfo[] threadDumps = this.threadDumper.dumpThreads(this.threadBean);
-            this.workerPool.execute(new InsertDataTask(threadDumps, window));
-        } catch (Throwable t) {
-            stop(false);
-            this.future.completeExceptionally(t);
         }
+    }
+
+    /**
+     * Waits until {@link System#nanoTime()} reaches the given time.
+     *
+     * <p>Normally by sleeping. But on Windows a sleep can end only on one of the system timer's
+     * interrupts, which may be as far as 15.6ms apart: how far depends on what else is running
+     * on the machine and on whether the game has a visible window. Sleeps are then far too long,
+     * and worse, they end at the same instants as every other sleep in the process, such as the
+     * game loop's sleep until its next tick, so every sample sees the start of a tick. When
+     * sleeps are seen to overrun like that, the thread stops sleeping and yields in a loop
+     * instead, which keeps one CPU core busy for as long as the profiler runs.</p>
+     *
+     * @return false if the sampler was stopped
+     */
+    private boolean sleepUntil(long nanoTime) {
+        while (this.running) {
+            long now = System.nanoTime();
+            long remaining = nanoTime - now;
+            if (remaining <= 0) {
+                return true;
+            }
+
+            if (this.sleepsOverrun) {
+                if (now - this.sleepsLastChecked < SLEEP_CHECK_INTERVAL_NANOS) {
+                    Thread.yield();
+                    continue;
+                }
+                // see if things have changed
+                this.sleepsLastChecked = now;
+                this.sleepOverruns = 0;
+            }
+
+            long sleep = Math.min(remaining, MAX_SLEEP_NANOS);
+            long millis = TimeUnit.NANOSECONDS.toMillis(sleep);
+            int nanos = (int) (sleep - TimeUnit.MILLISECONDS.toNanos(millis));
+
+            try {
+                Thread.sleep(millis, nanos);
+            } catch (InterruptedException e) {
+                continue; // stopped, or not: the loop checks
+            }
+
+            // the background profiler should cost as little as possible, so it puts up with it
+            if (this.background) {
+                continue;
+            }
+
+            boolean overran = System.nanoTime() - now - sleep > SLEEP_OVERRUN_NANOS;
+            if (!overran) {
+                this.sleepOverruns = 0;
+                this.sleepsOverrun = false;
+            } else if (this.sleepsOverrun || ++this.sleepOverruns >= SLEEP_OVERRUNS) {
+                this.sleepsOverrun = true;
+                this.sleepsLastChecked = System.nanoTime();
+            }
+        }
+        return false;
     }
 
     @Override
@@ -147,10 +324,14 @@ public class JavaSampler extends AbstractSampler implements Runnable {
     private final class InsertDataTask implements Runnable {
         private final ThreadInfo[] threadDumps;
         private final int window;
+        private final long nanoTime;
+        private final long time;
 
-        InsertDataTask(ThreadInfo[] threadDumps, int window) {
+        InsertDataTask(ThreadInfo[] threadDumps, int window, long nanoTime, long time) {
             this.threadDumps = threadDumps;
             this.window = window;
+            this.nanoTime = nanoTime;
+            this.time = time;
         }
 
         @Override
@@ -159,7 +340,7 @@ public class JavaSampler extends AbstractSampler implements Runnable {
                 if (threadInfo.getThreadName() == null || threadInfo.getStackTrace() == null) {
                     continue;
                 }
-                JavaSampler.this.dataAggregator.insertData(threadInfo, this.window);
+                JavaSampler.this.dataAggregator.insertData(threadInfo, this.window, this.nanoTime, this.time);
             }
 
             // if we have just stepped over into a new window...
@@ -204,7 +385,7 @@ public class JavaSampler extends AbstractSampler implements Runnable {
 
     @Override
     public String getLibraryVersion() {
-        return null;
+        return this.corrector != null ? "jfr" : null;
     }
 
     @Override

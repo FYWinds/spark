@@ -27,7 +27,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.LongSupplier;
 
-class ExceedingTicksFilter implements TickReporter.Callback {
+public class ExceedingTicksFilter implements TickReporter.Callback {
 
     /** The ticks that exceeded the threshold, cleared one-by-one when inserting data */
     private final Queue<ExceededTick> ticksOver = new ConcurrentLinkedQueue<>();

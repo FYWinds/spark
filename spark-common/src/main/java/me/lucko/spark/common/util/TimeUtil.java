@@ -47,6 +47,17 @@ public enum TimeUtil {
      * @return the current time in milliseconds, based on a monotonic clock
      */
     public static long monotonicCurrentTimeMillis() {
-        return REFERENCE_MILLIS + ((System.nanoTime() - REFERENCE_NANOS) / 1_000_000L);
+        return monotonicTimeMillis(System.nanoTime());
+    }
+
+    /**
+     * Converts a value of {@link System#nanoTime()} to the time {@link #monotonicCurrentTimeMillis()}
+     * returned at that moment.
+     *
+     * @param nanoTime the nano time
+     * @return the time in milliseconds, based on a monotonic clock
+     */
+    public static long monotonicTimeMillis(long nanoTime) {
+        return REFERENCE_MILLIS + ((nanoTime - REFERENCE_NANOS) / 1_000_000L);
     }
 }

@@ -26,11 +26,16 @@ import me.lucko.spark.proto.SparkSamplerProtos.SamplerMetadata;
 
 import java.lang.management.ThreadInfo;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Basic implementation of {@link DataAggregator}.
  */
 public class SimpleJavaDataAggregator extends JavaDataAggregator {
+
+    /** The length of the slices of time that samples are corrected in */
+    private static final long CORRECTION_SLICE_NANOS = TimeUnit.SECONDS.toNanos(1);
+
     public SimpleJavaDataAggregator(ExecutorService workerPool, ThreadGrouper threadGrouper, int interval, boolean ignoreSleeping) {
         super(workerPool, threadGrouper, interval, ignoreSleeping);
     }
@@ -44,8 +49,8 @@ public class SimpleJavaDataAggregator extends JavaDataAggregator {
     }
 
     @Override
-    public void insertData(ThreadInfo threadInfo, int window) {
-        writeData(threadInfo, window);
+    public void insertData(ThreadInfo threadInfo, int window, long nanoTime, long time) {
+        writeData(threadInfo, window, nanoTime, time, Math.floorDiv(nanoTime, CORRECTION_SLICE_NANOS));
     }
 
 }
