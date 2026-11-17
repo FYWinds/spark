@@ -69,6 +69,12 @@ public class SafepointBiasCorrectorTest {
         }
     }
 
+    private static void addUnbiased(SafepointBiasCorrector corrector, long threadId, StackTraceElement[] stack, long startNanos, int count) {
+        for (int i = 0; i < count; i++) {
+            corrector.onSample(threadId, "thread-" + threadId, stack, startNanos + (i * INTERVAL_NANOS), 1);
+        }
+    }
+
     /** Reports the JVM's sampler thread as having woken up at the given rate until the given time. */
     private static void heartbeats(SafepointBiasCorrector corrector, long untilNanos, long gapNanos) {
         for (int i = 40; i >= 0; i--) {
@@ -90,11 +96,10 @@ public class SafepointBiasCorrectorTest {
         // the thread was seen running 10 times = 40ms
         addBiased(corrector, 0, 1, 0, 10);
 
-        // the flight recorder saw it 4 times, 3 of them in the same place
-        corrector.onSample(1, "thread-1", HOT, INTERVAL_NANOS, 1);
-        corrector.onSample(1, "thread-1", HOT, 3 * INTERVAL_NANOS, 1);
-        corrector.onSample(1, "thread-1", WARM, 5 * INTERVAL_NANOS, 1);
-        corrector.onSample(1, "thread-1", HOT, 7 * INTERVAL_NANOS, 1);
+        // the flight recorder saw it 8 times, 6 of them in the same place
+        addUnbiased(corrector, 1, HOT, 0, 3);
+        addUnbiased(corrector, 1, WARM, 3 * INTERVAL_NANOS, 2);
+        addUnbiased(corrector, 1, HOT, 5 * INTERVAL_NANOS, 3);
 
         // nothing is written until all the samples for the bucket are known to have arrived
         watermark(corrector, 5 * INTERVAL_NANOS);
@@ -105,8 +110,8 @@ public class SafepointBiasCorrectorTest {
         assertEquals(10_000, output.time(1, "warm"));
         assertEquals(0, output.time(1, "atSafepoint"));
         assertTrue(output.windows.stream().allMatch(window -> window == 7));
-        assertEquals(10, corrector.getCorrectedSamples());
-        assertEquals(0, corrector.getUncorrectedSamples());
+        assertEquals(40_000, corrector.getCorrectedTime());
+        assertEquals(0, corrector.getUncorrectedTime());
     }
 
     @Test
@@ -115,9 +120,7 @@ public class SafepointBiasCorrectorTest {
         SafepointBiasCorrector corrector = new SafepointBiasCorrector(output, INTERVAL);
 
         addBiased(corrector, 0, 1, 0, 10);
-        for (int i = 0; i < 3; i++) {
-            corrector.onSample(1, "thread-1", HOT, i * INTERVAL_NANOS, 1);
-        }
+        addUnbiased(corrector, 1, HOT, 0, 7);
 
         watermark(corrector, SECOND);
         assertEquals(40_000, output.time(1, "hot"));
@@ -139,8 +142,46 @@ public class SafepointBiasCorrectorTest {
         assertEquals(40_000, output.time(1, "atSafepoint"));
         assertEquals(4_000, output.time(2, "hot"));
         assertEquals(0, output.time(3, "hot"));
-        assertEquals(1, corrector.getCorrectedSamples());
-        assertEquals(10, corrector.getUncorrectedSamples());
+        assertEquals(4_000, corrector.getCorrectedTime());
+        assertEquals(40_000, corrector.getUncorrectedTime());
+    }
+
+    @Test
+    public void testTimeInNativeCallsIsLeftAlone() {
+        Output output = new Output();
+        SafepointBiasCorrector corrector = new SafepointBiasCorrector(output, INTERVAL);
+
+        // a native function called through a method handle: not a native method, so the thread
+        // dump has the thread down as running java code
+        StackTraceElement[] inNativeCall = new StackTraceElement[]{new StackTraceElement("java.lang.invoke.LambdaForm$MH/0x0000000012345678", "invoke", null, -1), ROOT};
+        corrector.onNativeCaller(new StackTraceElement("java.lang.invoke.LambdaForm$MH/0x00000000abcdef00", "invoke", null, -1));
+
+        for (int i = 0; i < 10; i++) {
+            corrector.addBiasedSample(0, 1, "thread-1", i % 2 == 0 ? inNativeCall : SAFEPOINT, i * INTERVAL_NANOS, INTERVAL, 7);
+        }
+        addUnbiased(corrector, 1, HOT, 0, 5);
+
+        watermark(corrector, SECOND);
+        assertEquals(20_000, output.time(1, "invoke"));
+        assertEquals(20_000, output.time(1, "hot"));
+        assertEquals(0, output.time(1, "atSafepoint"));
+    }
+
+    @Test
+    public void testTimeIsLimitedToWhatTheFlightRecorderSaw() {
+        Output output = new Output();
+        SafepointBiasCorrector corrector = new SafepointBiasCorrector(output, INTERVAL);
+
+        // running for 400ms according to the thread dumps, but only seen running java code 9
+        // times: most of that time went on something else
+        addBiased(corrector, 0, 1, 0, 100);
+        addUnbiased(corrector, 1, HOT, 0, 9);
+
+        watermark(corrector, SECOND);
+        assertEquals(50_000, output.time(1, "hot"));
+        assertEquals(350_000, output.time(1, "atSafepoint"));
+        assertEquals(50_000, corrector.getCorrectedTime());
+        assertEquals(350_000, corrector.getUncorrectedTime());
     }
 
     @Test
@@ -154,7 +195,7 @@ public class SafepointBiasCorrectorTest {
 
         // a sample taken between them, e.g. during a tick that is not being profiled
         corrector.onSample(1, "thread-1", WARM, SECOND + (SECOND / 2), 1);
-        corrector.onSample(1, "thread-1", HOT, 2 * SECOND, 1);
+        addUnbiased(corrector, 1, HOT, 2 * SECOND, 3);
 
         watermark(corrector, 10 * SECOND);
         assertEquals(20_000, output.time(1, "atSafepoint")); // first bucket
@@ -172,7 +213,7 @@ public class SafepointBiasCorrectorTest {
         watermark(corrector, SECOND);
 
         // a long tick is only added once it has finished, after its samples have arrived
-        corrector.onSample(1, "thread-1", HOT, 3 * SECOND, 1);
+        addUnbiased(corrector, 1, HOT, 3 * SECOND, 3);
         watermark(corrector, 4 * SECOND);
         addBiased(corrector, 2, 1, 3 * SECOND, 5);
         watermark(corrector, 5 * SECOND);
@@ -205,7 +246,7 @@ public class SafepointBiasCorrectorTest {
         SafepointBiasCorrector corrector = new SafepointBiasCorrector(output, INTERVAL);
 
         addBiased(corrector, 0, 1, 0, 5);
-        corrector.onSample(1, "thread-1", HOT, 0, 1);
+        addUnbiased(corrector, 1, HOT, 0, 3);
         addBiased(corrector, 0, 2, 0, 5);
 
         heartbeats(corrector, SECOND, INTERVAL_NANOS);
@@ -266,7 +307,7 @@ public class SafepointBiasCorrectorTest {
 
         // it wakes up as often as it was asked to
         addBiased(corrector, 2, 1, 4 * SECOND, 10);
-        corrector.onSample(1, "thread-1", HOT, 4 * SECOND, 1);
+        addUnbiased(corrector, 1, HOT, 4 * SECOND, 8);
         watermark(corrector, 5 * SECOND);
         assertEquals(40_000, output.time(1, "hot"));
 

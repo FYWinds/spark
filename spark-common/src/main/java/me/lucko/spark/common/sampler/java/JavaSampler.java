@@ -181,14 +181,18 @@ public class JavaSampler extends AbstractSampler implements Runnable {
                 this.platform.getPlugin().log(Level.WARNING, "Some stack traces were deeper than the flight recorder is set up to record, so its samples were not used. " +
                         "To fix this, add -XX:FlightRecorderOptions:stackdepth=2048 to the JVM arguments.");
             } else if (!cancelled) {
-                long corrected = this.corrector.getCorrectedSamples();
-                long total = corrected + this.corrector.getUncorrectedSamples();
+                long corrected = this.corrector.getCorrectedTime();
+                long total = corrected + this.corrector.getUncorrectedTime();
                 if (total != 0 && corrected * 2 < total) {
                     String reason = this.corrector.wasSamplerIrregular()
                             ? "the JVM did not sample as often as it was asked to"
-                            : this.corrector.getIncompleteStacks() + " of its stack traces were incomplete";
-                    this.platform.getPlugin().log(Level.INFO, "The flight recorder could only be used for " + (corrected * 100 / total) + "% of the samples of running threads " +
-                            "(" + reason + "). The rest are shown where the built-in sampler saw them.");
+                            : this.corrector.getIncompleteStacks() != 0
+                            ? this.corrector.getIncompleteStacks() + " of its stack traces were incomplete"
+                            : "it saw them doing so less often than the built-in sampler";
+                    this.platform.getPlugin().log(Level.INFO, "The flight recorder could only be used for " + (corrected * 100 / total) + "% of the time threads were running Java code " +
+                            "(" + reason + "). The rest is shown where the built-in sampler saw it.");
+                } else if (total != 0) {
+                    this.platform.getPlugin().log(Level.INFO, "The flight recorder was used for " + (corrected * 100 / total) + "% of the time threads were running Java code.");
                 }
             }
         }

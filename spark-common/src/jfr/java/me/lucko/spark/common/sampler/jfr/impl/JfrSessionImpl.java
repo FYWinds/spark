@@ -129,10 +129,10 @@ final class JfrSessionImpl implements JfrSession {
                 this.stream.enable(EXECUTION_SAMPLE).withPeriod(period);
                 this.stream.onEvent(EXECUTION_SAMPLE, this::onExecutionSample);
 
-                // Threads inside native methods are sampled by the same JVM thread, one of them
+                // Threads inside native code are sampled by the same JVM thread, one of them
                 // each time it wakes up. With a thread that never leaves a native method, that
                 // shows how often the JVM really samples.
-                this.stream.enable(NATIVE_SAMPLE).withPeriod(period).withoutStackTrace();
+                this.stream.enable(NATIVE_SAMPLE).withPeriod(period);
                 this.stream.onEvent(NATIVE_SAMPLE, this::onNativeSample);
                 startHeartbeatThread();
                 break;
@@ -192,6 +192,29 @@ final class JfrSessionImpl implements JfrSession {
     private void onNativeSample(RecordedEvent event) {
         if (this.offsetCount != 0) {
             this.listener.onHeartbeat(epochNanos(event.getStartTime()) + this.offset);
+        }
+
+        RecordedStackTrace stackTrace = event.getStackTrace();
+        if (stackTrace == null) {
+            return;
+        }
+
+        // a native method is the top frame in a thread dump too, anything else is a native call
+        // made through a method handle, which a thread dump cannot tell from running Java code
+        boolean top = true;
+        for (RecordedFrame frame : stackTrace.getFrames()) {
+            RecordedMethod method = frame.getMethod();
+            RecordedClass type = method == null ? null : method.getType();
+            if (type == null || "Native".equals(frame.getType())) {
+                return;
+            }
+            if (top || !method.isHidden()) {
+                this.listener.onNativeCaller(new StackTraceElement(className(type.getName()), method.getName(), null, -1));
+            }
+            if (!method.isHidden()) {
+                return;
+            }
+            top = false;
         }
     }
 

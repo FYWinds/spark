@@ -28,6 +28,7 @@ import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
@@ -44,7 +45,14 @@ import java.util.concurrent.atomic.AtomicLong;
  * to hand out, and the flight recorder samples decide where it goes.</p>
  *
  * <p>Samples of threads that are sleeping, blocked or inside a native method are not
- * affected by safepoints and never reach this class.</p>
+ * affected by safepoints and never reach this class. A thread inside a native function it
+ * called through a method handle looks like it is running Java code, in a thread dump. The
+ * flight recorder can tell, so the methods it has seen such calls made from are remembered,
+ * and thread dump samples that end in one of them are left as they are.</p>
+ *
+ * <p>The flight recorder samples also limit how much time can be handed out: a thread it
+ * saw running Java code ten times was not running Java code for a whole second, whatever
+ * the thread dumps say. What is left over stays with the thread dump samples.</p>
  *
  * <p>Samples are grouped into buckets, identified by a key that increases over time
  * (a slice of time, or a game tick). If the flight recorder has nothing for a bucket,
@@ -105,8 +113,14 @@ public final class SafepointBiasCorrector implements JfrSampleListener {
     private volatile boolean disabled = false;
     private volatile boolean finished = false;
 
-    private final AtomicLong correctedSamples = new AtomicLong();
-    private final AtomicLong uncorrectedSamples = new AtomicLong();
+    /** The methods that threads were seen making native calls from */
+    private final Set<String> nativeCallers = ConcurrentHashMap.newKeySet();
+
+    /** The usual time between two samples by the JVM sampler, in microseconds */
+    private volatile long samplerPeriod;
+
+    private final AtomicLong correctedTime = new AtomicLong();
+    private final AtomicLong uncorrectedTime = new AtomicLong();
     private final AtomicLong incompleteStacks = new AtomicLong();
 
     /**
@@ -144,7 +158,7 @@ public final class SafepointBiasCorrector implements JfrSampleListener {
             }
         }
 
-        this.uncorrectedSamples.incrementAndGet();
+        this.uncorrectedTime.addAndGet(time);
         this.sink.write(threadId, threadName, stack, time, window);
     }
 
@@ -175,8 +189,22 @@ public final class SafepointBiasCorrector implements JfrSampleListener {
         if (this.heartbeats > HEARTBEATS) {
             System.arraycopy(this.heartbeatGaps, 0, this.sortedHeartbeatGaps, 0, HEARTBEATS);
             Arrays.sort(this.sortedHeartbeatGaps);
-            this.samplerRegular = this.sortedHeartbeatGaps[HEARTBEATS / 2] <= this.maxHeartbeatGapNanos;
+            long median = this.sortedHeartbeatGaps[HEARTBEATS / 2];
+            this.samplerPeriod = TimeUnit.NANOSECONDS.toMicros(median);
+            this.samplerRegular = median <= this.maxHeartbeatGapNanos;
         }
+    }
+
+    @Override
+    public void onNativeCaller(StackTraceElement frame) {
+        this.nativeCallers.add(key(frame));
+    }
+
+    private static String key(StackTraceElement frame) {
+        // hidden classes are named after their address, which is of no use here
+        String className = frame.getClassName();
+        int end = className.indexOf('/');
+        return (end == -1 ? className : className.substring(0, end)) + '.' + frame.getMethodName();
     }
 
     @Override
@@ -226,17 +254,17 @@ public final class SafepointBiasCorrector implements JfrSampleListener {
     }
 
     /**
-     * Gets the number of thread dump samples that were replaced.
+     * Gets the time of the thread dump samples that were replaced, in microseconds.
      */
-    public long getCorrectedSamples() {
-        return this.correctedSamples.get();
+    public long getCorrectedTime() {
+        return this.correctedTime.get();
     }
 
     /**
-     * Gets the number of thread dump samples that were used as they were.
+     * Gets the time of the thread dump samples that were used as they were, in microseconds.
      */
-    public long getUncorrectedSamples() {
-        return this.uncorrectedSamples.get();
+    public long getUncorrectedTime() {
+        return this.uncorrectedTime.get();
     }
 
     /**
@@ -299,6 +327,22 @@ public final class SafepointBiasCorrector implements JfrSampleListener {
         StackTraceElement bottom = bottom(bucket.stacks.get(0));
         int rejected = 0;
 
+        // a thread inside a native call was dumped where it was
+        long total = 0;
+        List<StackTraceElement[]> biased = new ArrayList<>(bucket.stacks.size());
+        List<Long> biasedTimes = new ArrayList<>(bucket.stacks.size());
+        for (int i = 0; i < bucket.stacks.size(); i++) {
+            StackTraceElement[] stack = bucket.stacks.get(i);
+            long time = bucket.times.get(i);
+            if (this.nativeCallers.contains(key(stack[0]))) {
+                this.sink.write(state.threadId, state.threadName, stack, time, bucket.window);
+            } else {
+                biased.add(stack);
+                biasedTimes.add(time);
+                total += time;
+            }
+        }
+
         List<StackTraceElement[]> unbiased = new ArrayList<>();
         while (!state.waiting.isEmpty() && state.waiting.peekFirst().nanoTime - to <= 0) {
             StackTraceElement[] stack = state.waiting.removeFirst().stack;
@@ -321,19 +365,28 @@ public final class SafepointBiasCorrector implements JfrSampleListener {
             unrepresentative = true;
         }
 
-        if (unbiased.isEmpty() || unrepresentative || this.disabled) {
-            this.uncorrectedSamples.addAndGet(bucket.stacks.size());
-            for (int i = 0; i < bucket.stacks.size(); i++) {
-                this.sink.write(state.threadId, state.threadName, bucket.stacks.get(i), bucket.times.get(i), bucket.window);
+        // the time the thread can have been running Java code for, going by how often it was seen doing so
+        long period = this.samplerPeriod;
+        long corrected = unbiased.isEmpty() || unrepresentative || this.disabled ? 0 : Math.min(total, (unbiased.size() + 1) * period * 5 / 4);
+        long uncorrected = total - corrected;
+
+        this.correctedTime.addAndGet(corrected);
+        this.uncorrectedTime.addAndGet(uncorrected);
+
+        if (uncorrected > 0) {
+            for (int i = 0; i < biased.size(); i++) {
+                long time = corrected == 0 ? biasedTimes.get(i) : biasedTimes.get(i) * uncorrected / total;
+                if (time > 0) {
+                    this.sink.write(state.threadId, state.threadName, biased.get(i), time, bucket.window);
+                }
             }
+        }
+        if (corrected == 0) {
             return;
         }
 
-        this.correctedSamples.addAndGet(bucket.stacks.size());
-
-        long total = bucket.totalTime;
-        long each = total / unbiased.size();
-        long remainder = total - (each * unbiased.size());
+        long each = corrected / unbiased.size();
+        long remainder = corrected - (each * unbiased.size());
         for (StackTraceElement[] stack : unbiased) {
             long time = each;
             if (remainder > 0) {

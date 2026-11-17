@@ -63,4 +63,15 @@ public interface JfrSampleListener {
      */
     void onHeartbeat(long nanoTime);
 
+    /**
+     * Called when a thread was sampled inside a native call that is not a native method, with
+     * a frame the call was made from. Such a thread looks like it is running Java code in that
+     * frame, to a thread dump. Only called for execution sampling.
+     *
+     * @param frame the top frame of the thread, or the top one that is not hidden
+     */
+    default void onNativeCaller(StackTraceElement frame) {
+
+    }
+
 }
