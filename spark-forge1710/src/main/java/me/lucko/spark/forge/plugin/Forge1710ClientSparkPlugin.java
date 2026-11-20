@@ -26,6 +26,7 @@ import me.lucko.spark.common.platform.world.WorldInfoProvider;
 import me.lucko.spark.common.sampler.ThreadDumper;
 import me.lucko.spark.common.tick.TickHook;
 import me.lucko.spark.common.tick.TickReporter;
+import me.lucko.spark.common.tick.TickType;
 import me.lucko.spark.forge.*;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.entity.EntityClientPlayerMP;
@@ -77,14 +78,23 @@ public class Forge1710ClientSparkPlugin extends Forge1710SparkPlugin {
         return Stream.of(new Forge1710CommandSender(player, this));
     }
 
+    // The client counts rendered frames instead of game ticks. Rendering and the game ticks share
+    // one thread: each iteration of the game loop runs the game ticks that are due and renders one
+    // frame, so frame times are what shows stutters on the client.
+
     @Override
     public TickHook createTickHook() {
-        return new Forge1710TickHook(TickEvent.Type.CLIENT);
+        return new Forge1710TickHook(TickEvent.Type.RENDER);
     }
 
     @Override
     public TickReporter createTickReporter() {
-        return new Forge1710TickReporter(TickEvent.Type.CLIENT);
+        return new Forge1710FrameReporter();
+    }
+
+    @Override
+    public TickType getTickType() {
+        return TickType.FRAME;
     }
 
     @Override

@@ -34,6 +34,7 @@ import me.lucko.spark.common.sampler.source.ClassSourceLookup;
 import me.lucko.spark.common.sampler.source.SourceMetadata;
 import me.lucko.spark.common.tick.TickHook;
 import me.lucko.spark.common.tick.TickReporter;
+import me.lucko.spark.common.tick.TickType;
 import me.lucko.spark.common.util.classfinder.ClassFinder;
 import me.lucko.spark.common.util.classfinder.FallbackClassFinder;
 import me.lucko.spark.common.util.classfinder.InstrumentationClassFinder;
@@ -122,6 +123,18 @@ public interface SparkPlugin extends Logger {
      */
     default TickReporter createTickReporter() {
         return null;
+    }
+
+    /**
+     * Gets what the ticks of the platform's {@link TickHook} and {@link TickReporter} are.
+     *
+     * <p>Platforms that count rendered frames instead of game ticks make spark measure and
+     * present the tick statistics as a frame rate and frame times, without a fixed target.</p>
+     *
+     * @return the tick type
+     */
+    default TickType getTickType() {
+        return TickType.GAME_TICK;
     }
 
     /**

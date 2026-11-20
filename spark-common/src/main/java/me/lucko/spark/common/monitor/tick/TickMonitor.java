@@ -24,6 +24,7 @@ import com.sun.management.GarbageCollectionNotificationInfo;
 import me.lucko.spark.common.SparkPlatform;
 import me.lucko.spark.common.monitor.memory.GarbageCollectionMonitor;
 import me.lucko.spark.common.tick.TickHook;
+import me.lucko.spark.common.tick.TickType;
 import net.kyori.adventure.text.Component;
 
 import java.text.DecimalFormat;
@@ -53,6 +54,8 @@ public abstract class TickMonitor implements TickHook.Callback, GarbageCollectio
     private final GarbageCollectionMonitor garbageCollectionMonitor;
     /** The predicate used to decide if a tick should be reported. */
     private final ReportPredicate reportPredicate;
+    /** What the ticks of the hook are, used to name them in messages. */
+    private final TickType tickType;
 
     /**
      * Enum representing the various phases in a tick monitors lifetime.
@@ -78,6 +81,7 @@ public abstract class TickMonitor implements TickHook.Callback, GarbageCollectio
         this.tickHook = tickHook;
         this.zeroTick = tickHook.getCurrentTick();
         this.reportPredicate = reportPredicate;
+        this.tickType = platform.getPlugin().getTickType();
 
         if (monitorGc) {
             this.garbageCollectionMonitor =  new GarbageCollectionMonitor();
@@ -114,8 +118,13 @@ public abstract class TickMonitor implements TickHook.Callback, GarbageCollectio
         if (this.phase == null) {
             this.phase = Phase.SETUP;
             this.lastTickTime = now;
-            sendMessage(text("Tick monitor started. Before the monitor becomes fully active, the server's " +
-                    "average tick rate will be calculated over a period of 120 ticks (approx 6 seconds)."));
+            if (this.tickType == TickType.FRAME) {
+                sendMessage(text("Tick monitor started. Before the monitor becomes fully active, the " +
+                        "average frame time will be calculated over a period of 120 frames."));
+            } else {
+                sendMessage(text("Tick monitor started. Before the monitor becomes fully active, the server's " +
+                        "average tick rate will be calculated over a period of 120 ticks (approx 6 seconds)."));
+            }
             return;
         }
 
@@ -163,7 +172,7 @@ public abstract class TickMonitor implements TickHook.Callback, GarbageCollectio
                             .append(text("ms"))
                             .build()
                     );
-                    sendMessage(this.reportPredicate.monitoringStartMessage());
+                    sendMessage(this.reportPredicate.monitoringStartMessage(this.tickType));
                 });
 
                 this.averageTickTime = this.averageTickTimeCalc.getAverage();
@@ -178,7 +187,7 @@ public abstract class TickMonitor implements TickHook.Callback, GarbageCollectio
                 this.platform.getPlugin().executeAsync(() -> {
                     sendMessage(text()
                             .color(GRAY)
-                            .append(text("Tick "))
+                            .append(text(this.tickType.displayName() + " "))
                             .append(text("#" + getCurrentTick(), DARK_GRAY))
                             .append(text(" lasted "))
                             .append(text(DF.format(tickDuration), GOLD))
@@ -204,7 +213,7 @@ public abstract class TickMonitor implements TickHook.Callback, GarbageCollectio
         this.platform.getPlugin().executeAsync(() -> {
             sendMessage(text()
                     .color(GRAY)
-                    .append(text("Tick "))
+                    .append(text(this.tickType.displayName() + " "))
                     .append(text("#" + getCurrentTick(), DARK_GRAY))
                     .append(text(" included "))
                     .append(text("GC", RED))

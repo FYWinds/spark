@@ -29,6 +29,11 @@ import java.util.concurrent.TimeUnit;
  */
 public interface TickStatistics extends AutoCloseable {
 
+    /**
+     * Gets the rate the game aims to tick at.
+     *
+     * @return the target rate, or 0 if there is no fixed target (e.g. for rendered frames)
+     */
     int gameTargetTps();
 
     double tps5Sec();
@@ -39,9 +44,18 @@ public interface TickStatistics extends AutoCloseable {
 
     boolean isDurationSupported();
 
+    /**
+     * Gets the longest a tick can last without the game falling behind its target rate.
+     *
+     * @return the duration in milliseconds, or 0 if there is no fixed target rate
+     */
     default int gameMaxIdealDuration() {
+        int gameTargetTps = gameTargetTps();
+        if (gameTargetTps <= 0) {
+            return 0;
+        }
         int millisInSeconds = (int) TimeUnit.SECONDS.toMillis(1);
-        return millisInSeconds / gameTargetTps();
+        return millisInSeconds / gameTargetTps;
     }
 
     DoubleAverageInfo duration10Sec();

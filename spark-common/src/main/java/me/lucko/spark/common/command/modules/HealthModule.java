@@ -40,6 +40,7 @@ import me.lucko.spark.common.monitor.ping.PingSummary;
 import me.lucko.spark.common.monitor.tick.TickStatistics;
 import me.lucko.spark.common.platform.SparkMetadata;
 import me.lucko.spark.common.sampler.Sampler;
+import me.lucko.spark.common.tick.TickType;
 import me.lucko.spark.common.util.FormatUtil;
 import me.lucko.spark.common.util.MediaTypes;
 import me.lucko.spark.common.util.RollingAverage;
@@ -124,7 +125,8 @@ public class HealthModule implements CommandModule {
     private static void tps(SparkPlatform platform, CommandSender sender, CommandResponseHandler resp, Arguments arguments) {
         TickStatistics tickStatistics = platform.getTickStatistics();
         if (tickStatistics != null) {
-            resp.replyPrefixed(text("TPS from last 5s, 10s, 1m, 5m, 15m:"));
+            TickType tickType = platform.getPlugin().getTickType();
+            resp.replyPrefixed(text(tickType.rateName() + " from last 5s, 10s, 1m, 5m, 15m:"));
             resp.replyPrefixed(text()
                     .content(" ")
                     .append(StatisticFormatter.formatTps(tickStatistics.tps5Sec(), tickStatistics.gameTargetTps())).append(text(", "))
@@ -137,7 +139,7 @@ public class HealthModule implements CommandModule {
             resp.replyPrefixed(empty());
 
             if (tickStatistics.isDurationSupported()) {
-                resp.replyPrefixed(text("Tick durations (min/med/95%ile/max ms) from last 10s, 1m:"));
+                resp.replyPrefixed(text(tickType.durationsName() + " (min/med/95%ile/max ms) from last 10s, 1m:"));
                 resp.replyPrefixed(text()
                         .content(" ")
                         .append(StatisticFormatter.formatTickDurations(tickStatistics.duration10Sec(), tickStatistics.gameMaxIdealDuration())).append(text(";  "))
@@ -230,7 +232,7 @@ public class HealthModule implements CommandModule {
 
         TickStatistics tickStatistics = platform.getTickStatistics();
         if (tickStatistics != null) {
-            addTickStats(report, tickStatistics);
+            addTickStats(report, tickStatistics, platform.getPlugin().getTickType());
         }
 
         addCpuStats(report);
@@ -297,11 +299,11 @@ public class HealthModule implements CommandModule {
         }
     }
 
-    private static void addTickStats(List<Component> report, TickStatistics tickStatistics) {
+    private static void addTickStats(List<Component> report, TickStatistics tickStatistics, TickType tickType) {
         report.add(text()
                 .append(text(">", DARK_GRAY, BOLD))
                 .append(space())
-                .append(text("TPS from last 5s, 10s, 1m, 5m, 15m:", GOLD))
+                .append(text(tickType.rateName() + " from last 5s, 10s, 1m, 5m, 15m:", GOLD))
                 .build()
         );
         report.add(text()
@@ -319,7 +321,7 @@ public class HealthModule implements CommandModule {
             report.add(text()
                     .append(text(">", DARK_GRAY, BOLD))
                     .append(space())
-                    .append(text("Tick durations (min/med/95%ile/max ms) from last 10s, 1m:", GOLD))
+                    .append(text(tickType.durationsName() + " (min/med/95%ile/max ms) from last 10s, 1m:", GOLD))
                     .build()
             );
             report.add(text()

@@ -34,6 +34,7 @@ import static net.kyori.adventure.text.format.NamedTextColor.DARK_GRAY;
 import static net.kyori.adventure.text.format.NamedTextColor.GRAY;
 import static net.kyori.adventure.text.format.NamedTextColor.GREEN;
 import static net.kyori.adventure.text.format.NamedTextColor.RED;
+import static net.kyori.adventure.text.format.NamedTextColor.WHITE;
 import static net.kyori.adventure.text.format.NamedTextColor.YELLOW;
 
 public enum StatisticFormatter {
@@ -43,6 +44,11 @@ public enum StatisticFormatter {
     private static final String BAR_FALSE_CHARACTER = "╻";
 
     public static TextComponent formatTps(double tps, int gameTargetTps) {
+        if (gameTargetTps <= 0) {
+            // no target to cap the value at or to compare it with
+            return text(Math.round(tps * 100.0) / 100.0, WHITE);
+        }
+
         TextColor color;
 
         if (tps > (gameTargetTps * 0.9d)) {
@@ -69,6 +75,11 @@ public enum StatisticFormatter {
     }
 
     public static TextComponent formatTickDuration(double duration, int gameMaxIdealDuration) {
+        if (gameMaxIdealDuration <= 0) {
+            // no target to compare the value with
+            return text(String.format(Locale.ENGLISH, "%.1f", duration), WHITE);
+        }
+
         TextColor color;
         if (duration >= gameMaxIdealDuration) {
             color = RED;
